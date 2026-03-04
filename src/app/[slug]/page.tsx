@@ -1,20 +1,26 @@
-import { supabase } from '@/lib/supabase'
+import { createClient } from '@supabase/supabase-js'
 import { notFound } from 'next/navigation'
 import Link from 'next/link'
 
 type Props = { params: Promise<{ slug: string }> }
 
 async function getBakerData(slug: string) {
+  const supabase = createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  )
+
   const { data: baker } = await supabase
     .from('baker_profiles')
     .select('*')
     .eq('slug', slug)
     .single()
+
   if (!baker) return null
 
   const { data: products } = await supabase
     .from('products')
-    .select('*')
+    .select('*, sizes(*)')
     .eq('baker_id', baker.id)
     .eq('is_active', true)
     .order('name')
@@ -43,8 +49,7 @@ export default async function BakerPage({ params }: Props) {
       {/* Cover banner */}
       {baker.cover_image_url ? (
         <div className="w-full h-48 md:h-64 overflow-hidden">
-          <img src={baker.cover_image_url} alt="Cover"
-            className="w-full h-full object-cover" />
+          <img src={baker.cover_image_url} alt="Cover" className="w-full h-full object-cover" />
         </div>
       ) : (
         <div className="w-full h-32" style={{ backgroundColor: `${accent}15` }} />
@@ -57,9 +62,9 @@ export default async function BakerPage({ params }: Props) {
             <img src={baker.logo_url} alt={baker.business_name}
               className="w-20 h-20 rounded-2xl object-cover border-4 border-white shadow-md" />
           ) : (
-            <div className="w-20 h-20 rounded-2xl border-4 border-white shadow-md flex items-center justify-center text-3xl"
-              style={{ backgroundColor: `${accent}20` }}>
-              🎂
+            <div className="w-20 h-20 rounded-2xl border-4 border-white shadow-md flex items-center justify-center font-bold text-2xl text-white"
+              style={{ backgroundColor: accent }}>
+              {baker.business_name?.charAt(0).toUpperCase()}
             </div>
           )}
           <div className="pb-1">
@@ -86,18 +91,18 @@ export default async function BakerPage({ params }: Props) {
           {baker.pickup_available && (
             <span className="px-3 py-1 text-sm font-semibold rounded-full"
               style={{ backgroundColor: `${accent}15`, color: accent }}>
-              🛍️ Pickup available
+              Pickup available
             </span>
           )}
           {baker.delivery_available && (
             <span className="px-3 py-1 text-sm font-semibold rounded-full"
               style={{ backgroundColor: `${accent}15`, color: accent }}>
-              🚗 Delivery available
+              Delivery available
             </span>
           )}
           {baker.lead_time_days && (
             <span className="px-3 py-1 text-sm font-semibold rounded-full bg-gray-100 text-gray-600">
-              ⏱ {baker.lead_time_days} day{baker.lead_time_days > 1 ? 's' : ''} notice
+              {baker.lead_time_days} day{baker.lead_time_days > 1 ? 's' : ''} notice required
             </span>
           )}
         </div>
@@ -107,22 +112,28 @@ export default async function BakerPage({ params }: Props) {
           <div className="mb-10">
             <h2 className="text-lg font-bold text-gray-900 mb-4">What I offer</h2>
             <div className="grid grid-cols-1 gap-3">
-              {products.map((product: any) => (
-                <div key={product.id}
-                  className="flex items-center justify-between p-4 rounded-xl border border-gray-100 bg-gray-50">
-                  <div>
-                    <p className="font-bold text-gray-900">{product.name}</p>
-                    {product.description && (
-                      <p className="text-sm text-gray-500 mt-0.5">{product.description}</p>
+              {products.map((product: any) => {
+                const minPrice = product.sizes?.length > 0
+                  ? Math.min(...product.sizes.map((s: any) => s.price))
+                  : product.starting_price
+
+                return (
+                  <div key={product.id}
+                    className="flex items-center justify-between p-4 rounded-xl border border-gray-100 bg-gray-50">
+                    <div>
+                      <p className="font-bold text-gray-900">{product.name}</p>
+                      {product.description && (
+                        <p className="text-sm text-gray-500 mt-0.5">{product.description}</p>
+                      )}
+                    </div>
+                    {baker.show_prices && minPrice > 0 && (
+                      <p className="text-sm font-bold ml-4 shrink-0" style={{ color: accent }}>
+                        From £{minPrice}
+                      </p>
                     )}
                   </div>
-                  {baker.show_prices && product.starting_price > 0 && (
-                    <p className="text-sm font-bold ml-4 shrink-0" style={{ color: accent }}>
-                      From £{product.starting_price}
-                    </p>
-                  )}
-                </div>
-              ))}
+                )
+              })}
             </div>
           </div>
         )}
