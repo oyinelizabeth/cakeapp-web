@@ -51,16 +51,11 @@ type Addon = {
   allow_quantity: boolean
 }
 
-// One selection per variant_group, keyed by group name
-type VariantSelections = Record<string, RawSize>
-
 type OrderItem = {
   product_id: string
   product_name: string
-  // For grouped variants: one selection per group
-  variant_selections: VariantSelections
-  // For flat (ungrouped) sizes: pick one
-  flat_size: RawSize | null
+  // keyed by group name (or '__flat__' for ungrouped)
+  size_selections: Record<string, string> // group -> size id
   flavour_id: string
   flavour_name: string
   filling_id: string
@@ -113,6 +108,7 @@ export default function OrderPage() {
         supabase.from('flavours').select('*').eq('baker_id', bakerData.id).eq('is_active', true).order('name'),
         supabase.from('addons').select('*').eq('baker_id', bakerData.id).eq('is_active', true).order('name'),
       ])
+
       setProducts((productsRes.data || []).map((p: any) => ({
         ...p,
         sizes: (p.sizes || []).sort((a: RawSize, b: RawSize) => a.sort_order - b.sort_order)
@@ -124,54 +120,38 @@ export default function OrderPage() {
     fetchData()
   }, [slug])
 
-  // Separate sizes into groups and flat
-  const getSizeGroups = (sizes: RawSize[]) => {
+  // Split sizes into groups. Ungrouped go under '__flat__'
+  const getSizeGroups = (sizes: RawSize[]): Record<string, RawSize[]> => {
     const groups: Record<string, RawSize[]> = {}
-    const flat: RawSize[] = []
     sizes.forEach(s => {
-      if (s.variant_group) {
-        if (!groups[s.variant_group]) groups[s.variant_group] = []
-        groups[s.variant_group].push(s)
-      } else {
-        flat.push(s)
-      }
+      const key = s.variant_group || '__flat__'
+      if (!groups[key]) groups[key] = []
+      groups[key].push(s)
     })
-    return { groups, flat }
+    return groups
   }
 
-  const isProductComplete = (item: OrderItem, product: Product) => {
-    const { groups, flat } = getSizeGroups(product.sizes)
-    const hasGroups = Object.keys(groups).length > 0
-    const hasFlat = flat.length > 0
-
-    if (hasGroups) {
-      // Must pick one from each group
-      for (const groupName of Object.keys(groups)) {
-        if (!item.variant_selections[groupName]) return false
-      }
-    }
-    if (hasFlat && !hasGroups) {
-      // Must pick one flat size
-      if (!item.flat_size) return false
+  const isProductComplete = (item: OrderItem, product: Product): boolean => {
+    const groups = getSizeGroups(product.sizes)
+    for (const key of Object.keys(groups)) {
+      if (!item.size_selections[key]) return false
     }
     return true
   }
 
-  const validateStep0 = () => {
-    if (orderItems.length === 0) return false
-    return orderItems.every(item => {
+  const validateStep0 = () =>
+    orderItems.length > 0 &&
+    orderItems.every(item => {
       const product = products.find(p => p.id === item.product_id)
       return product ? isProductComplete(item, product) : false
     })
-  }
 
   const addProduct = (product: Product) => {
     if (orderItems.find(i => i.product_id === product.id)) return
     setOrderItems([...orderItems, {
       product_id: product.id,
       product_name: product.name,
-      variant_selections: {},
-      flat_size: null,
+      size_selections: {},
       flavour_id: '', flavour_name: '',
       filling_id: '', filling_name: '',
       frosting_id: '', frosting_name: '',
@@ -188,26 +168,20 @@ export default function OrderPage() {
   const updateItem = (product_id: string, updates: Partial<OrderItem>) =>
     setOrderItems(orderItems.map(i => i.product_id === product_id ? { ...i, ...updates } : i))
 
-  const selectVariant = (item: OrderItem, groupName: string, size: RawSize) => {
-    const current = item.variant_selections[groupName]
-    // Toggle off if already selected
-    if (current?.id === size.id) {
-      const next = { ...item.variant_selections }
-      delete next[groupName]
-      updateItem(item.product_id, { variant_selections: next })
-    } else {
-      updateItem(item.product_id, {
-        variant_selections: { ...item.variant_selections, [groupName]: size }
-      })
-    }
-  }
+  const setSizeSelection = (item: OrderItem, groupKey: string, sizeId: string) =>
+    updateItem(item.product_id, {
+      size_selections: { ...item.size_selections, [groupKey]: sizeId }
+    })
 
-  const selectFlatSize = (item: OrderItem, size: RawSize) => {
-    if (item.flat_size?.id === size.id) {
-      updateItem(item.product_id, { flat_size: null })
-    } else {
-      updateItem(item.product_id, { flat_size: size })
-    }
+  const getSelectedSizeLabel = (item: OrderItem, product: Product): string => {
+    const groups = getSizeGroups(product.sizes)
+    return Object.entries(item.size_selections)
+      .map(([key, sizeId]) => {
+        const size = groups[key]?.find(s => s.id === sizeId)
+        return size ? size.label : ''
+      })
+      .filter(Boolean)
+      .join(', ')
   }
 
   const toggleAddon = (item: OrderItem, addon: Addon) => {
@@ -226,42 +200,6 @@ export default function OrderPage() {
     updateItem(item.product_id, {
       addons: item.addons.map(a => a.addon_id === addon_id ? { ...a, quantity: Math.max(1, qty) } : a)
     })
-
-  const getItemSummary = (item: OrderItem) => {
-    const parts: string[] = []
-    Object.entries(item.variant_selections).forEach(([, size]) => parts.push(size.label))
-    if (item.flat_size) parts.push(item.flat_size.label)
-    return parts.join(' · ')
-  }
-
-  const getItemPrice = (item: OrderItem, product: Product) => {
-    const { groups, flat } = getSizeGroups(product.sizes)
-    let total = 0
-
-    if (Object.keys(groups).length > 0) {
-      // For grouped variants: base price from first group's base option, add-ons from other groups
-      const allSelected = Object.values(item.variant_selections)
-      if (allSelected.length > 0) {
-        // Find the base (lowest priced) option in each group as starting point
-        const firstGroup = Object.values(groups)[0]
-        const basePrice = Math.min(...firstGroup.map(s => s.price))
-        total = basePrice
-        // Add price adjustments for other group selections
-        allSelected.forEach(size => {
-          if (!firstGroup.find(s => s.id === size.id)) {
-            total += size.price
-          } else if (size.price > basePrice) {
-            total += (size.price - basePrice)
-          }
-        })
-      }
-    } else if (item.flat_size) {
-      total = item.flat_size.price
-    }
-
-    total += item.addons.reduce((s, a) => s + (a.price * a.quantity), 0)
-    return total
-  }
 
   const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
@@ -303,14 +241,14 @@ export default function OrderPage() {
       }).select().single()
 
       if (orderError || !order) {
-        console.error('Order error:', orderError)
         setSubmitError('Failed to submit. Please try again.')
         setSubmitting(false)
         return
       }
 
       for (const item of orderItems) {
-        const sizeLabel = getItemSummary(item)
+        const product = products.find(p => p.id === item.product_id)
+        const sizeLabel = product ? getSelectedSizeLabel(item, product) : ''
         const flavourParts = [
           item.flavour_name,
           item.filling_name ? `${item.filling_name} filling` : '',
@@ -342,7 +280,7 @@ export default function OrderPage() {
 
       router.push(`/${slug}/order-confirmed`)
     } catch (err) {
-      console.error('Unexpected error:', err)
+      console.error(err)
       setSubmitError('Something went wrong. Please try again.')
       setSubmitting(false)
     }
@@ -399,9 +337,7 @@ export default function OrderPage() {
 
             {products.map(product => {
               const selected = orderItems.find(i => i.product_id === product.id)
-              const { groups, flat } = getSizeGroups(product.sizes)
-              const hasGroups = Object.keys(groups).length > 0
-              const complete = selected ? isProductComplete(selected, product) : false
+              const sizeGroups = getSizeGroups(product.sizes)
 
               return (
                 <div key={product.id} className={`mb-4 border-2 rounded-2xl overflow-hidden transition-all ${selected ? 'border-gray-900' : 'border-gray-100'}`}>
@@ -415,7 +351,7 @@ export default function OrderPage() {
                       {product.description && <p className="text-sm text-gray-400 mt-0.5">{product.description}</p>}
                       {product.sizes.length > 0 && (
                         <p className="text-xs text-gray-400 mt-1">
-                          From £{Math.min(...product.sizes.map(s => s.price).filter(p => p > 0))}
+                          From £{Math.min(...product.sizes.map(s => s.price))}
                         </p>
                       )}
                     </div>
@@ -429,93 +365,49 @@ export default function OrderPage() {
                     </div>
                   </button>
 
+                  {/* Expanded options */}
                   {selected && (
-                    <div className="border-t border-gray-100 bg-gray-50 p-4 space-y-5">
+                    <div className="border-t border-gray-100 bg-gray-50 p-4 space-y-4">
 
-                      {/* Grouped variant selectors — radio per group */}
-                      {hasGroups && Object.entries(groups).map(([groupName, groupSizes]) => {
-                        const selectedInGroup = selected.variant_selections[groupName]
-                        const missing = !selectedInGroup
+                      {/* One dropdown per size group */}
+                      {Object.entries(sizeGroups).map(([groupKey, groupSizes]) => {
+                        const label = groupKey === '__flat__' ? 'Size / Quantity' : groupKey
+                        const selectedId = selected.size_selections[groupKey] || ''
+                        const missing = !selectedId
+
                         return (
-                          <div key={groupName}>
-                            <div className="flex items-center justify-between mb-2">
+                          <div key={groupKey}>
+                            <div className="flex items-center justify-between mb-1.5">
                               <label className="text-xs font-bold text-gray-500 uppercase tracking-wide">
-                                {groupName} <span className="text-red-400">*</span>
+                                {label} <span className="text-red-400">*</span>
                               </label>
                               {missing && <span className="text-xs text-red-400 font-semibold">Required</span>}
                             </div>
-                            <div className="space-y-2">
-                              {groupSizes.map(size => {
-                                const isSelected = selectedInGroup?.id === size.id
-                                return (
-                                  <button key={size.id}
-                                    onClick={() => selectVariant(selected, groupName, size)}
-                                    className={`w-full flex items-center justify-between p-3 rounded-xl border-2 bg-white transition-all text-left ${isSelected ? 'border-gray-900' : 'border-gray-200'}`}
-                                  >
-                                    <div className="flex items-center gap-3">
-                                      {/* Radio circle */}
-                                      <div className={`w-5 h-5 rounded-full border-2 flex items-center justify-center shrink-0 ${isSelected ? 'border-gray-900' : 'border-gray-300'}`}
-                                        style={isSelected ? { borderColor: accent } : {}}>
-                                        {isSelected && (
-                                          <div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: accent }} />
-                                        )}
-                                      </div>
-                                      <div>
-                                        <p className="text-sm font-semibold text-gray-900">{size.label}</p>
-                                        {size.servings && size.servings > 0 && (
-                                          <p className="text-xs text-gray-400">Serves {size.servings}</p>
-                                        )}
-                                      </div>
-                                    </div>
-                                    <p className="text-sm font-bold text-gray-700">
-                                      {size.price === 0 ? 'Base' : `+£${size.price}`}
-                                    </p>
-                                  </button>
-                                )
-                              })}
+                            <div className="relative">
+                              <select
+                                value={selectedId}
+                                onChange={e => setSizeSelection(selected, groupKey, e.target.value)}
+                                className={`w-full appearance-none bg-white border-2 rounded-xl px-4 py-3 text-sm font-medium focus:outline-none pr-10 ${missing ? 'border-red-200' : selectedId ? 'border-gray-900' : 'border-gray-200'}`}
+                                style={selectedId ? { borderColor: accent } : {}}
+                              >
+                                <option value="">Select {label}...</option>
+                                {groupSizes.map(size => (
+                                  <option key={size.id} value={size.id}>
+                                    {size.label}
+                                    {size.servings ? ` — serves ${size.servings}` : ''}
+                                    {' '}— £{size.price}
+                                  </option>
+                                ))}
+                              </select>
+                              <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none">
+                                <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                                </svg>
+                              </div>
                             </div>
                           </div>
                         )
                       })}
-
-                      {/* Flat sizes (no group) — radio */}
-                      {!hasGroups && flat.length > 0 && (
-                        <div>
-                          <div className="flex items-center justify-between mb-2">
-                            <label className="text-xs font-bold text-gray-500 uppercase tracking-wide">
-                              Size / Quantity <span className="text-red-400">*</span>
-                            </label>
-                            {!selected.flat_size && <span className="text-xs text-red-400 font-semibold">Required</span>}
-                          </div>
-                          <div className="space-y-2">
-                            {flat.map(size => {
-                              const isSelected = selected.flat_size?.id === size.id
-                              return (
-                                <button key={size.id}
-                                  onClick={() => selectFlatSize(selected, size)}
-                                  className={`w-full flex items-center justify-between p-3 rounded-xl border-2 bg-white transition-all text-left ${isSelected ? 'border-gray-900' : 'border-gray-200'}`}
-                                >
-                                  <div className="flex items-center gap-3">
-                                    <div className={`w-5 h-5 rounded-full border-2 flex items-center justify-center shrink-0 ${isSelected ? 'border-gray-900' : 'border-gray-300'}`}
-                                      style={isSelected ? { borderColor: accent } : {}}>
-                                      {isSelected && (
-                                        <div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: accent }} />
-                                      )}
-                                    </div>
-                                    <div>
-                                      <p className="text-sm font-semibold text-gray-900">{size.label}</p>
-                                      {size.servings && size.servings > 0 && (
-                                        <p className="text-xs text-gray-400">Serves {size.servings}</p>
-                                      )}
-                                    </div>
-                                  </div>
-                                  <p className="text-sm font-bold text-gray-700">£{size.price}</p>
-                                </button>
-                              )
-                            })}
-                          </div>
-                        </div>
-                      )}
 
                       {/* Sponge Flavour */}
                       {spongeFlavours.length > 0 && (
@@ -526,9 +418,9 @@ export default function OrderPage() {
                               <button key={f.id}
                                 onClick={() => updateItem(product.id, {
                                   flavour_id: selected.flavour_id === f.id ? '' : f.id,
-                                  flavour_name: selected.flavour_id === f.id ? '' : f.name
+                                  flavour_name: selected.flavour_id === f.id ? '' : f.name,
                                 })}
-                                className={`px-3 py-1.5 rounded-full text-sm font-semibold border-2 transition-all ${selected.flavour_id === f.id ? 'text-white border-gray-900' : 'bg-white text-gray-600 border-gray-200'}`}
+                                className={`px-3 py-1.5 rounded-full text-sm font-semibold border-2 transition-all ${selected.flavour_id === f.id ? 'text-white' : 'bg-white text-gray-600 border-gray-200'}`}
                                 style={selected.flavour_id === f.id ? { backgroundColor: accent, borderColor: accent } : {}}>
                                 {f.name}{f.price_adjustment > 0 ? ` +£${f.price_adjustment}` : ''}
                               </button>
@@ -547,7 +439,7 @@ export default function OrderPage() {
                               <button key={f.id}
                                 onClick={() => updateItem(product.id, {
                                   filling_id: selected.filling_id === f.id ? '' : f.id,
-                                  filling_name: selected.filling_id === f.id ? '' : f.name
+                                  filling_name: selected.filling_id === f.id ? '' : f.name,
                                 })}
                                 className={`px-3 py-1.5 rounded-full text-sm font-semibold border-2 transition-all ${selected.filling_id === f.id ? 'text-white' : 'bg-white text-gray-600 border-gray-200'}`}
                                 style={selected.filling_id === f.id ? { backgroundColor: accent, borderColor: accent } : {}}>
@@ -567,7 +459,7 @@ export default function OrderPage() {
                               <button key={f.id}
                                 onClick={() => updateItem(product.id, {
                                   frosting_id: selected.frosting_id === f.id ? '' : f.id,
-                                  frosting_name: selected.frosting_id === f.id ? '' : f.name
+                                  frosting_name: selected.frosting_id === f.id ? '' : f.name,
                                 })}
                                 className={`px-3 py-1.5 rounded-full text-sm font-semibold border-2 transition-all ${selected.frosting_id === f.id ? 'text-white' : 'bg-white text-gray-600 border-gray-200'}`}
                                 style={selected.frosting_id === f.id ? { backgroundColor: accent, borderColor: accent } : {}}>
@@ -588,7 +480,7 @@ export default function OrderPage() {
                               return (
                                 <div key={addon.id} className={`flex items-center justify-between p-3 rounded-xl border-2 bg-white transition-all ${selectedAddon ? 'border-gray-900' : 'border-gray-200'}`}>
                                   <button onClick={() => toggleAddon(selected, addon)} className="flex items-center gap-3 flex-1 text-left">
-                                    <div className={`w-5 h-5 rounded border-2 flex items-center justify-center shrink-0 ${selectedAddon ? 'border-gray-900' : 'border-gray-300'}`}
+                                    <div className={`w-5 h-5 rounded border-2 flex items-center justify-center shrink-0 ${selectedAddon ? '' : 'border-gray-300'}`}
                                       style={selectedAddon ? { backgroundColor: accent, borderColor: accent } : {}}>
                                       {selectedAddon && (
                                         <svg className="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -647,7 +539,6 @@ export default function OrderPage() {
               <h2 className="text-2xl font-extrabold text-gray-900 mb-1">Your details</h2>
               <p className="text-gray-500 text-sm mb-6">Tell us about yourself and your event.</p>
             </div>
-
             <div>
               <label className="text-xs font-bold text-gray-500 uppercase tracking-wide">Your Name *</label>
               <input type="text" placeholder="Jane Smith" value={customerName}
@@ -669,7 +560,6 @@ export default function OrderPage() {
                 <p className="text-xs text-gray-400 mt-1">{baker.lead_time_days} days notice required</p>
               )}
             </div>
-
             {(baker?.pickup_available || baker?.delivery_available) && (
               <div>
                 <label className="text-xs font-bold text-gray-500 uppercase tracking-wide">Collection Type *</label>
@@ -691,7 +581,6 @@ export default function OrderPage() {
                 </div>
               </div>
             )}
-
             <div>
               <label className="text-xs font-bold text-gray-500 uppercase tracking-wide">Budget (optional)</label>
               <div className="relative mt-2">
@@ -701,14 +590,12 @@ export default function OrderPage() {
                   className="w-full pl-8 pr-4 py-3 rounded-xl border border-gray-200 text-sm focus:outline-none focus:border-gray-400" />
               </div>
             </div>
-
             <div>
               <label className="text-xs font-bold text-gray-500 uppercase tracking-wide">Dietary Requirements</label>
               <input type="text" placeholder="e.g. Vegan, Gluten free" value={dietary}
                 onChange={e => setDietary(e.target.value)}
                 className="w-full mt-2 px-4 py-3 rounded-xl border border-gray-200 text-sm focus:outline-none focus:border-gray-400" />
             </div>
-
             <div>
               <label className="text-xs font-bold text-gray-500 uppercase tracking-wide">Allergens</label>
               <input type="text" placeholder="e.g. Nut allergy, Dairy free" value={allergens}
@@ -716,7 +603,6 @@ export default function OrderPage() {
                 className="w-full mt-2 px-4 py-3 rounded-xl border border-gray-200 text-sm focus:outline-none focus:border-gray-400" />
               <p className="text-xs text-orange-500 mt-1 font-medium">Please list all allergens — this is important for your safety</p>
             </div>
-
             <div>
               <label className="text-xs font-bold text-gray-500 uppercase tracking-wide">Inspiration Image (optional)</label>
               <p className="text-xs text-gray-400 mt-1 mb-2">Upload a photo of a style you love</p>
@@ -726,9 +612,7 @@ export default function OrderPage() {
                     <img src={inspoPreview} alt="Inspiration" className="w-full h-full object-cover" />
                     <button type="button"
                       onClick={e => { e.preventDefault(); setInspoImage(null); setInspoPreview(null) }}
-                      className="absolute top-2 right-2 bg-white rounded-full w-6 h-6 flex items-center justify-center shadow text-gray-500 font-bold text-xs">
-                      ✕
-                    </button>
+                      className="absolute top-2 right-2 bg-white rounded-full w-6 h-6 flex items-center justify-center shadow text-gray-500 font-bold text-xs">✕</button>
                   </div>
                 ) : (
                   <div className="flex flex-col items-center gap-2 text-gray-400">
@@ -742,7 +626,6 @@ export default function OrderPage() {
                 <input type="file" accept="image/*" className="hidden" onChange={handleImageChange} />
               </label>
             </div>
-
             <div>
               <label className="text-xs font-bold text-gray-500 uppercase tracking-wide">Additional Notes</label>
               <textarea placeholder="Anything else we should know..." value={notes}
@@ -762,14 +645,17 @@ export default function OrderPage() {
               <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wide mb-3">Order Items</h3>
               {orderItems.map(item => {
                 const product = products.find(p => p.id === item.product_id)
+                const groups = product ? getSizeGroups(product.sizes) : {}
                 return (
                   <div key={item.product_id} className="mb-3 p-4 rounded-xl border border-gray-100 bg-gray-50">
                     <p className="font-bold text-gray-900">{item.product_name}</p>
-                    {/* Variant selections */}
-                    {Object.entries(item.variant_selections).map(([group, size]) => (
-                      <p key={group} className="text-sm text-gray-500 mt-1">{group}: {size.label}</p>
-                    ))}
-                    {item.flat_size && <p className="text-sm text-gray-500 mt-1">Size: {item.flat_size.label}</p>}
+                    {Object.entries(item.size_selections).map(([groupKey, sizeId]) => {
+                      const size = groups[groupKey]?.find(s => s.id === sizeId)
+                      const label = groupKey === '__flat__' ? 'Size' : groupKey
+                      return size ? (
+                        <p key={groupKey} className="text-sm text-gray-500 mt-1">{label}: {size.label}</p>
+                      ) : null
+                    })}
                     {item.flavour_name && <p className="text-sm text-gray-500">Sponge: {item.flavour_name}</p>}
                     {item.filling_name && <p className="text-sm text-gray-500">Filling: {item.filling_name}</p>}
                     {item.frosting_name && <p className="text-sm text-gray-500">Frosting: {item.frosting_name}</p>}
@@ -807,12 +693,14 @@ export default function OrderPage() {
                   dietary ? ['Dietary', dietary] : null,
                   allergens ? ['Allergens', allergens] : null,
                   notes ? ['Notes', notes] : null,
-                ] as ([string, string] | null)[]).filter((item): item is [string, string] => item !== null).map(([label, value]) => (
-                  <div key={label} className="flex justify-between text-sm">
-                    <span className="text-gray-400 font-medium">{label}</span>
-                    <span className="text-gray-900 font-semibold text-right ml-4">{value}</span>
-                  </div>
-                ))}
+                ] as ([string, string] | null)[])
+                  .filter((r): r is [string, string] => r !== null)
+                  .map(([label, value]) => (
+                    <div key={label} className="flex justify-between text-sm">
+                      <span className="text-gray-400 font-medium">{label}</span>
+                      <span className="text-gray-900 font-semibold text-right ml-4">{value}</span>
+                    </div>
+                  ))}
               </div>
             </div>
 
@@ -834,13 +722,11 @@ export default function OrderPage() {
         <div className="max-w-2xl mx-auto">
           {step === 0 && (
             <button onClick={() => setStep(1)} disabled={!validateStep0()}
-              className="w-full text-white font-bold py-4 rounded-2xl disabled:opacity-40 disabled:cursor-not-allowed transition-opacity"
+              className="w-full text-white font-bold py-4 rounded-2xl disabled:opacity-40 disabled:cursor-not-allowed"
               style={{ backgroundColor: accent }}>
-              {orderItems.length === 0
-                ? 'Select a product to continue'
-                : !validateStep0()
-                  ? 'Please complete all required options'
-                  : `Continue →`}
+              {orderItems.length === 0 ? 'Select a product to continue'
+                : !validateStep0() ? 'Please complete all required options'
+                : 'Continue →'}
             </button>
           )}
           {step === 1 && (
