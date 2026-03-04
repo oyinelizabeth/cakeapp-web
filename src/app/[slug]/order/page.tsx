@@ -17,19 +17,31 @@ type Baker = {
   delivery_available: boolean
   accent_color: string
 }
+
+type RawSize = {
+  id: string
+  label: string
+  price: number
+  servings?: number
+  variant_group?: string | null
+  sort_order: number
+}
+
 type Product = {
   id: string
   name: string
   description: string
   category: string
-  sizes: { id: string; label: string; price: number; servings: number }[]
+  sizes: RawSize[]
 }
+
 type Flavour = {
   id: string
   name: string
   price_adjustment: number
   type: 'flavour' | 'filling' | 'frosting'
 }
+
 type Addon = {
   id: string
   name: string
@@ -37,16 +49,18 @@ type Addon = {
   price_note: string
   is_required: boolean
   allow_quantity: boolean
-  category: string
 }
 
-type SelectedSize = { id: string; label: string; price: number }
+// One selection per variant_group, keyed by group name
+type VariantSelections = Record<string, RawSize>
 
 type OrderItem = {
   product_id: string
   product_name: string
-  quantity: number
-  selected_sizes: SelectedSize[]
+  // For grouped variants: one selection per group
+  variant_selections: VariantSelections
+  // For flat (ungrouped) sizes: pick one
+  flat_size: RawSize | null
   flavour_id: string
   flavour_name: string
   filling_id: string
@@ -73,7 +87,6 @@ export default function OrderPage() {
   const [submitting, setSubmitting] = useState(false)
   const [submitError, setSubmitError] = useState('')
 
-  // Order state
   const [orderItems, setOrderItems] = useState<OrderItem[]>([])
   const [customerName, setCustomerName] = useState('')
   const [customerEmail, setCustomerEmail] = useState('')
@@ -100,7 +113,10 @@ export default function OrderPage() {
         supabase.from('flavours').select('*').eq('baker_id', bakerData.id).eq('is_active', true).order('name'),
         supabase.from('addons').select('*').eq('baker_id', bakerData.id).eq('is_active', true).order('name'),
       ])
-      setProducts(productsRes.data || [])
+      setProducts((productsRes.data || []).map((p: any) => ({
+        ...p,
+        sizes: (p.sizes || []).sort((a: RawSize, b: RawSize) => a.sort_order - b.sort_order)
+      })))
       setFlavours(flavoursRes.data || [])
       setAddons(addonsRes.data || [])
       setLoading(false)
@@ -108,17 +124,54 @@ export default function OrderPage() {
     fetchData()
   }, [slug])
 
-  const spongeFlavours = flavours.filter(f => f.type === 'flavour' || !f.type)
-  const fillings = flavours.filter(f => f.type === 'filling')
-  const frostings = flavours.filter(f => f.type === 'frosting')
+  // Separate sizes into groups and flat
+  const getSizeGroups = (sizes: RawSize[]) => {
+    const groups: Record<string, RawSize[]> = {}
+    const flat: RawSize[] = []
+    sizes.forEach(s => {
+      if (s.variant_group) {
+        if (!groups[s.variant_group]) groups[s.variant_group] = []
+        groups[s.variant_group].push(s)
+      } else {
+        flat.push(s)
+      }
+    })
+    return { groups, flat }
+  }
+
+  const isProductComplete = (item: OrderItem, product: Product) => {
+    const { groups, flat } = getSizeGroups(product.sizes)
+    const hasGroups = Object.keys(groups).length > 0
+    const hasFlat = flat.length > 0
+
+    if (hasGroups) {
+      // Must pick one from each group
+      for (const groupName of Object.keys(groups)) {
+        if (!item.variant_selections[groupName]) return false
+      }
+    }
+    if (hasFlat && !hasGroups) {
+      // Must pick one flat size
+      if (!item.flat_size) return false
+    }
+    return true
+  }
+
+  const validateStep0 = () => {
+    if (orderItems.length === 0) return false
+    return orderItems.every(item => {
+      const product = products.find(p => p.id === item.product_id)
+      return product ? isProductComplete(item, product) : false
+    })
+  }
 
   const addProduct = (product: Product) => {
     if (orderItems.find(i => i.product_id === product.id)) return
     setOrderItems([...orderItems, {
       product_id: product.id,
       product_name: product.name,
-      quantity: 1,
-      selected_sizes: [],
+      variant_selections: {},
+      flat_size: null,
       flavour_id: '', flavour_name: '',
       filling_id: '', filling_name: '',
       frosting_id: '', frosting_name: '',
@@ -135,12 +188,25 @@ export default function OrderPage() {
   const updateItem = (product_id: string, updates: Partial<OrderItem>) =>
     setOrderItems(orderItems.map(i => i.product_id === product_id ? { ...i, ...updates } : i))
 
-  const toggleSize = (item: OrderItem, size: { id: string; label: string; price: number }) => {
-    const exists = item.selected_sizes.find(s => s.id === size.id)
-    if (exists) {
-      updateItem(item.product_id, { selected_sizes: item.selected_sizes.filter(s => s.id !== size.id) })
+  const selectVariant = (item: OrderItem, groupName: string, size: RawSize) => {
+    const current = item.variant_selections[groupName]
+    // Toggle off if already selected
+    if (current?.id === size.id) {
+      const next = { ...item.variant_selections }
+      delete next[groupName]
+      updateItem(item.product_id, { variant_selections: next })
     } else {
-      updateItem(item.product_id, { selected_sizes: [...item.selected_sizes, size] })
+      updateItem(item.product_id, {
+        variant_selections: { ...item.variant_selections, [groupName]: size }
+      })
+    }
+  }
+
+  const selectFlatSize = (item: OrderItem, size: RawSize) => {
+    if (item.flat_size?.id === size.id) {
+      updateItem(item.product_id, { flat_size: null })
+    } else {
+      updateItem(item.product_id, { flat_size: size })
     }
   }
 
@@ -161,18 +227,47 @@ export default function OrderPage() {
       addons: item.addons.map(a => a.addon_id === addon_id ? { ...a, quantity: Math.max(1, qty) } : a)
     })
 
+  const getItemSummary = (item: OrderItem) => {
+    const parts: string[] = []
+    Object.entries(item.variant_selections).forEach(([, size]) => parts.push(size.label))
+    if (item.flat_size) parts.push(item.flat_size.label)
+    return parts.join(' · ')
+  }
+
+  const getItemPrice = (item: OrderItem, product: Product) => {
+    const { groups, flat } = getSizeGroups(product.sizes)
+    let total = 0
+
+    if (Object.keys(groups).length > 0) {
+      // For grouped variants: base price from first group's base option, add-ons from other groups
+      const allSelected = Object.values(item.variant_selections)
+      if (allSelected.length > 0) {
+        // Find the base (lowest priced) option in each group as starting point
+        const firstGroup = Object.values(groups)[0]
+        const basePrice = Math.min(...firstGroup.map(s => s.price))
+        total = basePrice
+        // Add price adjustments for other group selections
+        allSelected.forEach(size => {
+          if (!firstGroup.find(s => s.id === size.id)) {
+            total += size.price
+          } else if (size.price > basePrice) {
+            total += (size.price - basePrice)
+          }
+        })
+      }
+    } else if (item.flat_size) {
+      total = item.flat_size.price
+    }
+
+    total += item.addons.reduce((s, a) => s + (a.price * a.quantity), 0)
+    return total
+  }
+
   const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file) return
     setInspoImage(file)
     setInspoPreview(URL.createObjectURL(file))
-  }
-
-  const validateStep0 = () => {
-    for (const item of orderItems) {
-      if (item.selected_sizes.length === 0) return false
-    }
-    return orderItems.length > 0
   }
 
   const handleSubmit = async () => {
@@ -181,21 +276,18 @@ export default function OrderPage() {
     setSubmitError('')
 
     try {
-      // Upload inspo image if provided
       let inspoImageUrl = null
       if (inspoImage) {
         const ext = inspoImage.name.split('.').pop()
         const filename = `inspo-${Date.now()}.${ext}`
         const { data: uploadData, error: uploadError } = await supabase.storage
-          .from('order-inspo')
-          .upload(filename, inspoImage, { contentType: inspoImage.type, upsert: false })
+          .from('order-inspo').upload(filename, inspoImage, { contentType: inspoImage.type })
         if (!uploadError && uploadData) {
           const { data: { publicUrl } } = supabase.storage.from('order-inspo').getPublicUrl(filename)
           inspoImageUrl = publicUrl
         }
       }
 
-      // Create order
       const { data: order, error: orderError } = await supabase.from('orders').insert({
         baker_id: baker.id,
         customer_name: customerName,
@@ -212,34 +304,28 @@ export default function OrderPage() {
 
       if (orderError || !order) {
         console.error('Order error:', orderError)
-        setSubmitError('Failed to submit your order. Please try again.')
+        setSubmitError('Failed to submit. Please try again.')
         setSubmitting(false)
         return
       }
 
-      // Create order items
       for (const item of orderItems) {
-        const sizeLabel = item.selected_sizes.map(s => s.label).join(', ')
+        const sizeLabel = getItemSummary(item)
         const flavourParts = [
           item.flavour_name,
           item.filling_name ? `${item.filling_name} filling` : '',
           item.frosting_name ? `${item.frosting_name} frosting` : '',
         ].filter(Boolean).join(', ')
 
-        const { data: orderItem, error: itemError } = await supabase.from('order_items').insert({
+        const { data: orderItem } = await supabase.from('order_items').insert({
           order_id: order.id,
           product_id: item.product_id,
           product_name: item.product_name,
-          quantity: item.quantity,
+          quantity: 1,
           size: sizeLabel,
           flavour: flavourParts,
           notes: item.notes,
         }).select().single()
-
-        if (itemError) {
-          console.error('Item error:', itemError)
-          continue
-        }
 
         if (orderItem && item.addons.length > 0) {
           await supabase.from('order_item_addons').insert(
@@ -268,6 +354,10 @@ export default function OrderPage() {
     return d.toISOString().split('T')[0]
   }
 
+  const spongeFlavours = flavours.filter(f => f.type === 'flavour' || !f.type)
+  const fillings = flavours.filter(f => f.type === 'filling')
+  const frostings = flavours.filter(f => f.type === 'frosting')
+
   if (loading) return (
     <div className="min-h-screen flex items-center justify-center">
       <div className="text-gray-400 text-sm">Loading...</div>
@@ -293,9 +383,7 @@ export default function OrderPage() {
           </div>
           <div className="flex justify-between mt-1.5">
             {STEPS.map((s, i) => (
-              <span key={s} className={`text-xs font-semibold ${i === step ? 'text-gray-900' : 'text-gray-300'}`}>
-                {s}
-              </span>
+              <span key={s} className={`text-xs font-semibold ${i === step ? 'text-gray-900' : 'text-gray-300'}`}>{s}</span>
             ))}
           </div>
         </div>
@@ -311,11 +399,13 @@ export default function OrderPage() {
 
             {products.map(product => {
               const selected = orderItems.find(i => i.product_id === product.id)
-              const sizes = product.sizes || []
-              const missingSizes = selected && selected.selected_sizes.length === 0
+              const { groups, flat } = getSizeGroups(product.sizes)
+              const hasGroups = Object.keys(groups).length > 0
+              const complete = selected ? isProductComplete(selected, product) : false
 
               return (
                 <div key={product.id} className={`mb-4 border-2 rounded-2xl overflow-hidden transition-all ${selected ? 'border-gray-900' : 'border-gray-100'}`}>
+                  {/* Product header */}
                   <button
                     onClick={() => selected ? removeProduct(product.id) : addProduct(product)}
                     className="w-full flex items-center justify-between p-4 text-left"
@@ -323,8 +413,10 @@ export default function OrderPage() {
                     <div>
                       <p className="font-bold text-gray-900">{product.name}</p>
                       {product.description && <p className="text-sm text-gray-400 mt-0.5">{product.description}</p>}
-                      {sizes.length > 0 && (
-                        <p className="text-xs text-gray-400 mt-1">From £{Math.min(...sizes.map(s => s.price))}</p>
+                      {product.sizes.length > 0 && (
+                        <p className="text-xs text-gray-400 mt-1">
+                          From £{Math.min(...product.sizes.map(s => s.price).filter(p => p > 0))}
+                        </p>
                       )}
                     </div>
                     <div className={`w-6 h-6 rounded-full border-2 flex items-center justify-center shrink-0 ml-4 transition-all ${selected ? 'border-gray-900' : 'border-gray-200'}`}
@@ -340,43 +432,84 @@ export default function OrderPage() {
                   {selected && (
                     <div className="border-t border-gray-100 bg-gray-50 p-4 space-y-5">
 
-                      {/* Size — compulsory checklist */}
-                      {sizes.length > 0 && (
+                      {/* Grouped variant selectors — radio per group */}
+                      {hasGroups && Object.entries(groups).map(([groupName, groupSizes]) => {
+                        const selectedInGroup = selected.variant_selections[groupName]
+                        const missing = !selectedInGroup
+                        return (
+                          <div key={groupName}>
+                            <div className="flex items-center justify-between mb-2">
+                              <label className="text-xs font-bold text-gray-500 uppercase tracking-wide">
+                                {groupName} <span className="text-red-400">*</span>
+                              </label>
+                              {missing && <span className="text-xs text-red-400 font-semibold">Required</span>}
+                            </div>
+                            <div className="space-y-2">
+                              {groupSizes.map(size => {
+                                const isSelected = selectedInGroup?.id === size.id
+                                return (
+                                  <button key={size.id}
+                                    onClick={() => selectVariant(selected, groupName, size)}
+                                    className={`w-full flex items-center justify-between p-3 rounded-xl border-2 bg-white transition-all text-left ${isSelected ? 'border-gray-900' : 'border-gray-200'}`}
+                                  >
+                                    <div className="flex items-center gap-3">
+                                      {/* Radio circle */}
+                                      <div className={`w-5 h-5 rounded-full border-2 flex items-center justify-center shrink-0 ${isSelected ? 'border-gray-900' : 'border-gray-300'}`}
+                                        style={isSelected ? { borderColor: accent } : {}}>
+                                        {isSelected && (
+                                          <div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: accent }} />
+                                        )}
+                                      </div>
+                                      <div>
+                                        <p className="text-sm font-semibold text-gray-900">{size.label}</p>
+                                        {size.servings && size.servings > 0 && (
+                                          <p className="text-xs text-gray-400">Serves {size.servings}</p>
+                                        )}
+                                      </div>
+                                    </div>
+                                    <p className="text-sm font-bold text-gray-700">
+                                      {size.price === 0 ? 'Base' : `+£${size.price}`}
+                                    </p>
+                                  </button>
+                                )
+                              })}
+                            </div>
+                          </div>
+                        )
+                      })}
+
+                      {/* Flat sizes (no group) — radio */}
+                      {!hasGroups && flat.length > 0 && (
                         <div>
                           <div className="flex items-center justify-between mb-2">
                             <label className="text-xs font-bold text-gray-500 uppercase tracking-wide">
-                              Size <span className="text-red-400">*</span>
+                              Size / Quantity <span className="text-red-400">*</span>
                             </label>
-                            {missingSizes && (
-                              <span className="text-xs text-red-400 font-semibold">Please select a size</span>
-                            )}
+                            {!selected.flat_size && <span className="text-xs text-red-400 font-semibold">Required</span>}
                           </div>
                           <div className="space-y-2">
-                            {sizes.sort((a, b) => a.price - b.price).map(size => {
-                              const isSelected = selected.selected_sizes.find(s => s.id === size.id)
+                            {flat.map(size => {
+                              const isSelected = selected.flat_size?.id === size.id
                               return (
-                                <button
-                                  key={size.id}
-                                  onClick={() => toggleSize(selected, size)}
+                                <button key={size.id}
+                                  onClick={() => selectFlatSize(selected, size)}
                                   className={`w-full flex items-center justify-between p-3 rounded-xl border-2 bg-white transition-all text-left ${isSelected ? 'border-gray-900' : 'border-gray-200'}`}
                                 >
                                   <div className="flex items-center gap-3">
-                                    <div className={`w-5 h-5 rounded border-2 flex items-center justify-center shrink-0 ${isSelected ? 'border-gray-900' : 'border-gray-300'}`}
-                                      style={isSelected ? { backgroundColor: accent, borderColor: accent } : {}}>
+                                    <div className={`w-5 h-5 rounded-full border-2 flex items-center justify-center shrink-0 ${isSelected ? 'border-gray-900' : 'border-gray-300'}`}
+                                      style={isSelected ? { borderColor: accent } : {}}>
                                       {isSelected && (
-                                        <svg className="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
-                                        </svg>
+                                        <div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: accent }} />
                                       )}
                                     </div>
                                     <div>
                                       <p className="text-sm font-semibold text-gray-900">{size.label}</p>
-                                      {size.servings > 0 && (
+                                      {size.servings && size.servings > 0 && (
                                         <p className="text-xs text-gray-400">Serves {size.servings}</p>
                                       )}
                                     </div>
                                   </div>
-                                  <p className="text-sm font-bold text-gray-900">£{size.price}</p>
+                                  <p className="text-sm font-bold text-gray-700">£{size.price}</p>
                                 </button>
                               )
                             })}
@@ -391,7 +524,10 @@ export default function OrderPage() {
                           <div className="flex flex-wrap gap-2 mt-2">
                             {spongeFlavours.map(f => (
                               <button key={f.id}
-                                onClick={() => updateItem(product.id, { flavour_id: f.id, flavour_name: f.name })}
+                                onClick={() => updateItem(product.id, {
+                                  flavour_id: selected.flavour_id === f.id ? '' : f.id,
+                                  flavour_name: selected.flavour_id === f.id ? '' : f.name
+                                })}
                                 className={`px-3 py-1.5 rounded-full text-sm font-semibold border-2 transition-all ${selected.flavour_id === f.id ? 'text-white border-gray-900' : 'bg-white text-gray-600 border-gray-200'}`}
                                 style={selected.flavour_id === f.id ? { backgroundColor: accent, borderColor: accent } : {}}>
                                 {f.name}{f.price_adjustment > 0 ? ` +£${f.price_adjustment}` : ''}
@@ -409,8 +545,11 @@ export default function OrderPage() {
                           <div className="flex flex-wrap gap-2">
                             {fillings.map(f => (
                               <button key={f.id}
-                                onClick={() => updateItem(product.id, { filling_id: f.id, filling_name: f.name })}
-                                className={`px-3 py-1.5 rounded-full text-sm font-semibold border-2 transition-all ${selected.filling_id === f.id ? 'text-white border-gray-900' : 'bg-white text-gray-600 border-gray-200'}`}
+                                onClick={() => updateItem(product.id, {
+                                  filling_id: selected.filling_id === f.id ? '' : f.id,
+                                  filling_name: selected.filling_id === f.id ? '' : f.name
+                                })}
+                                className={`px-3 py-1.5 rounded-full text-sm font-semibold border-2 transition-all ${selected.filling_id === f.id ? 'text-white' : 'bg-white text-gray-600 border-gray-200'}`}
                                 style={selected.filling_id === f.id ? { backgroundColor: accent, borderColor: accent } : {}}>
                                 {f.name}{f.price_adjustment > 0 ? ` +£${f.price_adjustment}` : ''}
                               </button>
@@ -426,8 +565,11 @@ export default function OrderPage() {
                           <div className="flex flex-wrap gap-2 mt-2">
                             {frostings.map(f => (
                               <button key={f.id}
-                                onClick={() => updateItem(product.id, { frosting_id: f.id, frosting_name: f.name })}
-                                className={`px-3 py-1.5 rounded-full text-sm font-semibold border-2 transition-all ${selected.frosting_id === f.id ? 'text-white border-gray-900' : 'bg-white text-gray-600 border-gray-200'}`}
+                                onClick={() => updateItem(product.id, {
+                                  frosting_id: selected.frosting_id === f.id ? '' : f.id,
+                                  frosting_name: selected.frosting_id === f.id ? '' : f.name
+                                })}
+                                className={`px-3 py-1.5 rounded-full text-sm font-semibold border-2 transition-all ${selected.frosting_id === f.id ? 'text-white' : 'bg-white text-gray-600 border-gray-200'}`}
                                 style={selected.frosting_id === f.id ? { backgroundColor: accent, borderColor: accent } : {}}>
                                 {f.name}{f.price_adjustment > 0 ? ` +£${f.price_adjustment}` : ''}
                               </button>
@@ -445,8 +587,7 @@ export default function OrderPage() {
                               const selectedAddon = selected.addons.find(a => a.addon_id === addon.id)
                               return (
                                 <div key={addon.id} className={`flex items-center justify-between p-3 rounded-xl border-2 bg-white transition-all ${selectedAddon ? 'border-gray-900' : 'border-gray-200'}`}>
-                                  <button onClick={() => toggleAddon(selected, addon)}
-                                    className="flex items-center gap-3 flex-1 text-left">
+                                  <button onClick={() => toggleAddon(selected, addon)} className="flex items-center gap-3 flex-1 text-left">
                                     <div className={`w-5 h-5 rounded border-2 flex items-center justify-center shrink-0 ${selectedAddon ? 'border-gray-900' : 'border-gray-300'}`}
                                       style={selectedAddon ? { backgroundColor: accent, borderColor: accent } : {}}>
                                       {selectedAddon && (
@@ -459,7 +600,6 @@ export default function OrderPage() {
                                       <p className="text-sm font-semibold text-gray-900">{addon.name}</p>
                                       <p className="text-xs text-gray-400">
                                         £{addon.price}{addon.allow_quantity ? ' each' : ''}
-                                        {addon.price_note ? ` · ${addon.price_note}` : ''}
                                         {addon.is_required && <span className="ml-1 text-orange-500">· Required</span>}
                                       </p>
                                     </div>
@@ -514,14 +654,12 @@ export default function OrderPage() {
                 onChange={e => setCustomerName(e.target.value)}
                 className="w-full mt-2 px-4 py-3 rounded-xl border border-gray-200 text-sm focus:outline-none focus:border-gray-400" />
             </div>
-
             <div>
               <label className="text-xs font-bold text-gray-500 uppercase tracking-wide">Email Address *</label>
               <input type="email" placeholder="jane@example.com" value={customerEmail}
                 onChange={e => setCustomerEmail(e.target.value)}
                 className="w-full mt-2 px-4 py-3 rounded-xl border border-gray-200 text-sm focus:outline-none focus:border-gray-400" />
             </div>
-
             <div>
               <label className="text-xs font-bold text-gray-500 uppercase tracking-wide">Event Date *</label>
               <input type="date" value={eventDate} min={minDate()}
@@ -579,19 +717,18 @@ export default function OrderPage() {
               <p className="text-xs text-orange-500 mt-1 font-medium">Please list all allergens — this is important for your safety</p>
             </div>
 
-            {/* Inspo image upload */}
             <div>
               <label className="text-xs font-bold text-gray-500 uppercase tracking-wide">Inspiration Image (optional)</label>
-              <p className="text-xs text-gray-400 mt-1 mb-2">Upload a photo of a cake style you love</p>
-              <label className={`flex flex-col items-center justify-center w-full h-36 border-2 border-dashed rounded-xl cursor-pointer transition-all ${inspoPreview ? 'border-gray-300' : 'border-gray-200 hover:border-gray-400'}`}>
+              <p className="text-xs text-gray-400 mt-1 mb-2">Upload a photo of a style you love</p>
+              <label className="flex flex-col items-center justify-center w-full h-36 border-2 border-dashed border-gray-200 rounded-xl cursor-pointer hover:border-gray-400 transition-all overflow-hidden">
                 {inspoPreview ? (
                   <div className="relative w-full h-full">
-                    <img src={inspoPreview} alt="Inspiration" className="w-full h-full object-cover rounded-xl" />
-                    <button
-                      type="button"
+                    <img src={inspoPreview} alt="Inspiration" className="w-full h-full object-cover" />
+                    <button type="button"
                       onClick={e => { e.preventDefault(); setInspoImage(null); setInspoPreview(null) }}
-                      className="absolute top-2 right-2 bg-white rounded-full w-6 h-6 flex items-center justify-center shadow text-gray-500 font-bold text-xs"
-                    >✕</button>
+                      className="absolute top-2 right-2 bg-white rounded-full w-6 h-6 flex items-center justify-center shadow text-gray-500 font-bold text-xs">
+                      ✕
+                    </button>
                   </div>
                 ) : (
                   <div className="flex flex-col items-center gap-2 text-gray-400">
@@ -608,7 +745,7 @@ export default function OrderPage() {
 
             <div>
               <label className="text-xs font-bold text-gray-500 uppercase tracking-wide">Additional Notes</label>
-              <textarea placeholder="Anything else we should know about your order..." value={notes}
+              <textarea placeholder="Anything else we should know..." value={notes}
                 onChange={e => setNotes(e.target.value)} rows={3}
                 className="w-full mt-2 px-4 py-3 rounded-xl border border-gray-200 text-sm focus:outline-none focus:border-gray-400 resize-none" />
             </div>
@@ -623,29 +760,32 @@ export default function OrderPage() {
 
             <div className="mb-6">
               <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wide mb-3">Order Items</h3>
-              {orderItems.map(item => (
-                <div key={item.product_id} className="mb-3 p-4 rounded-xl border border-gray-100 bg-gray-50">
-                  <p className="font-bold text-gray-900">{item.product_name}</p>
-                  {item.selected_sizes.length > 0 && (
-                    <p className="text-sm text-gray-500 mt-1">
-                      Size: {item.selected_sizes.map(s => s.label).join(', ')}
-                    </p>
-                  )}
-                  {item.flavour_name && <p className="text-sm text-gray-500">Sponge: {item.flavour_name}</p>}
-                  {item.filling_name && <p className="text-sm text-gray-500">Filling: {item.filling_name}</p>}
-                  {item.frosting_name && <p className="text-sm text-gray-500">Frosting: {item.frosting_name}</p>}
-                  {item.addons.length > 0 && (
-                    <div className="mt-2">
-                      {item.addons.map(a => (
-                        <p key={a.addon_id} className="text-sm text-gray-400">
-                          + {a.quantity > 1 ? `${a.quantity}x ` : ''}{a.addon_name} (£{(a.price * a.quantity).toFixed(2)})
-                        </p>
-                      ))}
-                    </div>
-                  )}
-                  {item.notes && <p className="text-sm text-gray-400 italic mt-2">"{item.notes}"</p>}
-                </div>
-              ))}
+              {orderItems.map(item => {
+                const product = products.find(p => p.id === item.product_id)
+                return (
+                  <div key={item.product_id} className="mb-3 p-4 rounded-xl border border-gray-100 bg-gray-50">
+                    <p className="font-bold text-gray-900">{item.product_name}</p>
+                    {/* Variant selections */}
+                    {Object.entries(item.variant_selections).map(([group, size]) => (
+                      <p key={group} className="text-sm text-gray-500 mt-1">{group}: {size.label}</p>
+                    ))}
+                    {item.flat_size && <p className="text-sm text-gray-500 mt-1">Size: {item.flat_size.label}</p>}
+                    {item.flavour_name && <p className="text-sm text-gray-500">Sponge: {item.flavour_name}</p>}
+                    {item.filling_name && <p className="text-sm text-gray-500">Filling: {item.filling_name}</p>}
+                    {item.frosting_name && <p className="text-sm text-gray-500">Frosting: {item.frosting_name}</p>}
+                    {item.addons.length > 0 && (
+                      <div className="mt-2">
+                        {item.addons.map(a => (
+                          <p key={a.addon_id} className="text-sm text-gray-400">
+                            + {a.quantity > 1 ? `${a.quantity}x ` : ''}{a.addon_name} (£{(a.price * a.quantity).toFixed(2)})
+                          </p>
+                        ))}
+                      </div>
+                    )}
+                    {item.notes && <p className="text-sm text-gray-400 italic mt-2">"{item.notes}"</p>}
+                  </div>
+                )
+              })}
             </div>
 
             {inspoPreview && (
@@ -658,7 +798,7 @@ export default function OrderPage() {
             <div className="mb-6">
               <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wide mb-3">Your Details</h3>
               <div className="p-4 rounded-xl border border-gray-100 bg-gray-50 space-y-2">
-                {[
+                {([
                   ['Name', customerName],
                   ['Email', customerEmail],
                   ['Event Date', eventDate],
@@ -667,7 +807,7 @@ export default function OrderPage() {
                   dietary ? ['Dietary', dietary] : null,
                   allergens ? ['Allergens', allergens] : null,
                   notes ? ['Notes', notes] : null,
-                ].filter((item): item is [string, string] => item !== null).map(([label, value]) => (
+                ] as ([string, string] | null)[]).filter((item): item is [string, string] => item !== null).map(([label, value]) => (
                   <div key={label} className="flex justify-between text-sm">
                     <span className="text-gray-400 font-medium">{label}</span>
                     <span className="text-gray-900 font-semibold text-right ml-4">{value}</span>
@@ -693,37 +833,27 @@ export default function OrderPage() {
       <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-gray-100 p-4">
         <div className="max-w-2xl mx-auto">
           {step === 0 && (
-            <button
-              onClick={() => setStep(1)}
-              disabled={!validateStep0()}
+            <button onClick={() => setStep(1)} disabled={!validateStep0()}
               className="w-full text-white font-bold py-4 rounded-2xl disabled:opacity-40 disabled:cursor-not-allowed transition-opacity"
-              style={{ backgroundColor: accent }}
-            >
+              style={{ backgroundColor: accent }}>
               {orderItems.length === 0
                 ? 'Select a product to continue'
-                : orderItems.some(i => i.selected_sizes.length === 0)
-                  ? 'Please select a size for each item'
-                  : `Continue with ${orderItems.length} item${orderItems.length !== 1 ? 's' : ''} →`
-              }
+                : !validateStep0()
+                  ? 'Please complete all required options'
+                  : `Continue →`}
             </button>
           )}
           {step === 1 && (
-            <button
-              onClick={() => setStep(2)}
-              disabled={!customerName || !customerEmail || !eventDate}
+            <button onClick={() => setStep(2)} disabled={!customerName || !customerEmail || !eventDate}
               className="w-full text-white font-bold py-4 rounded-2xl disabled:opacity-40 disabled:cursor-not-allowed"
-              style={{ backgroundColor: accent }}
-            >
+              style={{ backgroundColor: accent }}>
               Review Order →
             </button>
           )}
           {step === 2 && (
-            <button
-              onClick={handleSubmit}
-              disabled={submitting}
+            <button onClick={handleSubmit} disabled={submitting}
               className="w-full text-white font-bold py-4 rounded-2xl disabled:opacity-40"
-              style={{ backgroundColor: accent }}
-            >
+              style={{ backgroundColor: accent }}>
               {submitting ? 'Submitting...' : 'Submit Request'}
             </button>
           )}
