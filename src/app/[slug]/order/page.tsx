@@ -101,7 +101,7 @@ export default function EnquiryPage() {
         notes: enquiry,
       })
 
-      router.push('/order-confirmed')
+      router.push(`/${slug}/order-confirmed`)
     } catch (err) {
       console.error(err)
       setError('Something went wrong. Please try again.')

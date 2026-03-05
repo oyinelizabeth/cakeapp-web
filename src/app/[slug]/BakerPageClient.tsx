@@ -202,3 +202,94 @@ export default function BakerPageClient({ slug, accent, blockedDates, workingDay
     </section>
   )
 }
+
+export function OrderPopupButton({ slug, accent }: { slug: string; accent: string }) {
+  const [open, setOpen] = useState(false)
+
+  return (
+    <>
+      {/* Sticky button */}
+      <div className="fixed bottom-0 left-0 right-0 z-40 md:hidden px-4 pb-6 pt-3 bg-gradient-to-t from-[#f5f4f2] to-transparent pointer-events-none">
+        <button
+          onClick={() => setOpen(true)}
+          className="pointer-events-auto w-full flex items-center justify-center gap-2 text-white py-4 rounded-2xl font-bold text-sm shadow-xl hover:opacity-90 transition-opacity"
+          style={{ backgroundColor: accent }}
+        >
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M3 3h2l.4 2M7 13h10l4-8H5.4M7 13L5.4 5M7 13l-2.293 2.293c-.63.63-.184 1.707.707 1.707H17m0 0a2 2 0 100 4 2 2 0 000-4zm-8 2a2 2 0 11-4 0 2 2 0 014 0z" />
+          </svg>
+          Place an Order
+        </button>
+      </div>
+
+      {/* Popup overlay */}
+      {open && (
+        <div
+          className="fixed inset-0 z-50 flex items-end md:items-center justify-center px-4 pb-6 md:pb-0"
+          style={{ backgroundColor: 'rgba(0,0,0,0.4)' }}
+          onClick={() => setOpen(false)}
+        >
+          <div
+            className="w-full max-w-sm bg-white rounded-3xl p-6 shadow-2xl"
+            onClick={e => e.stopPropagation()}
+          >
+            {/* Handle bar */}
+            <div className="w-10 h-1 rounded-full bg-gray-200 mx-auto mb-5" />
+
+            <h3 className="text-lg font-extrabold text-slate-900 mb-1">How would you like to order?</h3>
+            <p className="text-sm text-slate-400 mb-6">Browse the menu to pick a product, or send an enquiry for something custom.</p>
+
+            <div className="flex flex-col gap-3">
+              <a
+                href={`/${slug}/menu`}
+                onClick={() => setOpen(false)}
+                className="flex items-center gap-4 p-4 rounded-2xl border-2 border-gray-100 hover:border-gray-200 transition-colors"
+              >
+                <div className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0"
+                  style={{ backgroundColor: `${accent}15` }}>
+                  <svg className="w-5 h-5" style={{ color: accent }} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 10h16M4 14h16M4 18h16" />
+                  </svg>
+                </div>
+                <div>
+                  <p className="font-bold text-sm text-slate-900">Browse the Menu</p>
+                  <p className="text-xs text-slate-400 mt-0.5">Pick a cake from our product listings</p>
+                </div>
+                <svg className="w-4 h-4 text-gray-300 ml-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                </svg>
+              </a>
+
+              <a
+                href={`/${slug}/order`}
+                className="flex items-center gap-4 p-4 rounded-2xl border-2 transition-colors"
+                style={{ borderColor: `${accent}40`, backgroundColor: `${accent}08` }}
+              >
+                <div className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0"
+                  style={{ backgroundColor: `${accent}20` }}>
+                  <svg className="w-5 h-5" style={{ color: accent }} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                  </svg>
+                </div>
+                <div>
+                  <p className="font-bold text-sm" style={{ color: accent }}>Send an Enquiry</p>
+                  <p className="text-xs text-slate-400 mt-0.5">For custom or bespoke orders</p>
+                </div>
+                <svg className="w-4 h-4 ml-auto" style={{ color: `${accent}80` }} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                </svg>
+              </a>
+            </div>
+
+            <button
+              onClick={() => setOpen(false)}
+              className="mt-4 w-full py-3 rounded-2xl text-sm font-semibold text-slate-400 bg-gray-50 hover:bg-gray-100 transition-colors"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+    </>
+  )
+}
