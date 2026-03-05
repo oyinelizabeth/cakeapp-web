@@ -267,43 +267,6 @@ export default function ProductPage() {
               </div>
             ) : (
               <>
-                {/* ── Standard / Tall ── only shown if baker enabled has_tall */}
-                {product.has_tall && (
-                  <div>
-                    <h3 className="text-sm font-bold text-slate-900 mb-2 flex items-center gap-2">
-                      <span style={{ color: accent }}>◆</span> Cake Style
-                    </h3>
-                    <div className="grid grid-cols-2 gap-2.5">
-                      {[
-                        { value: false, label: 'Standard', sub: 'Regular height' },
-                        { value: true, label: 'Tall', sub: selectedSize ? `+£${selectedSize.price_adjustment || '?'}` : 'Extra height' },
-                      ].map(opt => {
-                        const isSelected = isTall === opt.value
-                        return (
-                          <button
-                            key={String(opt.value)}
-                            onClick={() => setIsTall(opt.value)}
-                            className="flex flex-col items-center justify-center p-3 rounded-xl border-2 transition-all"
-                            style={isSelected
-                              ? { borderColor: accent, backgroundColor: `${accent}10` }
-                              : { borderColor: '#e5e7eb', backgroundColor: '#f9fafb' }}
-                          >
-                            <span className="text-sm font-bold" style={isSelected ? { color: accent } : { color: '#111' }}>
-                              {opt.label}
-                            </span>
-                            <span className="text-[11px] mt-0.5" style={isSelected ? { color: `${accent}99` } : { color: '#9ca3af' }}>
-                              {opt.sub}
-                            </span>
-                          </button>
-                        )
-                      })}
-                    </div>
-                    {isTall && !selectedSize && (
-                      <p className="text-xs text-slate-400 mt-2">Select a size to see the tall upcharge</p>
-                    )}
-                  </div>
-                )}
-
                 {/* ── Size selection ── */}
                 {product.sizes.length > 0 ? (
                   <div>
@@ -315,14 +278,9 @@ export default function ProductPage() {
                     <div className="grid grid-cols-3 gap-2.5">
                       {product.sizes.map(size => {
                         const isSelected = selectedSize?.id === size.id
-                        // Show tall price if tall is selected and size has an upcharge
-                        const displayPrice = isTall && size.price_adjustment > 0
-                          ? size.price + size.price_adjustment
-                          : size.price
-                        const hasTallUpcharge = product.has_tall && size.price_adjustment > 0
                         return (
                           <button key={size.id}
-                            onClick={() => setSelectedSize(isSelected ? null : size)}
+                            onClick={() => { setSelectedSize(isSelected ? null : size); setIsTall(false) }}
                             className="flex flex-col items-center justify-center p-3 rounded-xl border-2 transition-all"
                             style={isSelected
                               ? { borderColor: accent, backgroundColor: `${accent}10` }
@@ -336,13 +294,8 @@ export default function ProductPage() {
                               </span>
                             )}
                             <span className="text-[11px] font-semibold mt-1" style={isSelected ? { color: accent } : { color: '#6b7280' }}>
-                              £{displayPrice}
+                              £{size.price}
                             </span>
-                            {hasTallUpcharge && !isTall && (
-                              <span className="text-[9px] mt-0.5" style={{ color: '#9ca3af' }}>
-                                Tall: £{size.price + size.price_adjustment}
-                              </span>
-                            )}
                           </button>
                         )
                       })}
@@ -350,6 +303,34 @@ export default function ProductPage() {
                   </div>
                 ) : (
                   <div className="text-xs text-slate-400 italic px-1">No sizes configured for this product yet.</div>
+                )}
+
+                {/* ── Tall option — shown after size is picked ── */}
+                {product.has_tall && selectedSize && (
+                  <div
+                    className="flex items-center justify-between p-4 rounded-xl border-2 transition-all"
+                    style={{ borderColor: isTall ? accent : '#e5e7eb', backgroundColor: isTall ? `${accent}08` : '#f9fafb' }}
+                  >
+                    <div>
+                      <p className="text-sm font-bold text-slate-900">Make it tall?</p>
+                      <p className="text-xs text-slate-400 mt-0.5">
+                        Extra height tier
+                        {selectedSize.price_adjustment > 0 && (
+                          <span className="font-semibold" style={{ color: accent }}> +£{selectedSize.price_adjustment}</span>
+                        )}
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => setIsTall(!isTall)}
+                      className="relative inline-flex h-6 w-11 items-center rounded-full transition-colors"
+                      style={{ backgroundColor: isTall ? accent : '#d1d5db' }}
+                    >
+                      <span
+                        className="inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform"
+                        style={{ transform: isTall ? 'translateX(22px)' : 'translateX(2px)' }}
+                      />
+                    </button>
+                  </div>
                 )}
 
                 {/* ── Sponge flavour ── */}
