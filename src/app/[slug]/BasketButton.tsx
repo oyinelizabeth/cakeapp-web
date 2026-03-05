@@ -1,13 +1,9 @@
 'use client'
-
 import { useEffect, useState } from 'react'
 import Link from 'next/link'
-
 type Props = { slug: string; accent: string }
-
 export default function BasketButton({ slug, accent }: Props) {
   const [count, setCount] = useState(0)
-
   useEffect(() => {
     const update = () => {
       try {
@@ -23,7 +19,6 @@ export default function BasketButton({ slug, accent }: Props) {
       window.removeEventListener('storage', update)
     }
   }, [slug])
-
   if (count === 0) return (
     <Link href={`/${slug}/order`}
       className="text-white px-4 py-2 rounded-lg font-semibold text-sm hover:opacity-90 transition-opacity"
@@ -31,7 +26,6 @@ export default function BasketButton({ slug, accent }: Props) {
       Request an Order
     </Link>
   )
-
   return (
     <Link href={`/${slug}/basket`}
       className="relative flex items-center gap-2 text-white px-4 py-2 rounded-lg font-semibold text-sm hover:opacity-90 transition-opacity"
