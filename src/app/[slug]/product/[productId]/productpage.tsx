@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { createClient } from '@supabase/supabase-js'
 
@@ -27,6 +27,14 @@ type Product = {
   addons: Addon[]
 }
 
+// Sort flavours: free items first, then by name
+const sortFlavours = (flavours: Flavour[]) =>
+  [...flavours].sort((a, b) => {
+    if (a.price_adjustment === 0 && b.price_adjustment > 0) return -1
+    if (a.price_adjustment > 0 && b.price_adjustment === 0) return 1
+    return a.name.localeCompare(b.name)
+  })
+
 export default function ProductPage() {
   const params = useParams()
   const router = useRouter()
@@ -39,6 +47,7 @@ export default function ProductPage() {
 
   // Selections
   const [selectedSize, setSelectedSize] = useState<Size | null>(null)
+  const [selectedLayers, setSelectedLayers] = useState<number>(1)
   const [selectedFlavour, setSelectedFlavour] = useState<Flavour | null>(null)
   const [selectedFilling, setSelectedFilling] = useState<Flavour | null>(null)
   const [selectedFrosting, setSelectedFrosting] = useState<Flavour | null>(null)
@@ -46,8 +55,13 @@ export default function ProductPage() {
   const [notes, setNotes] = useState('')
   const [selectedAddons, setSelectedAddons] = useState<{ addon: Addon; qty: number }[]>([])
 
+  // Inspiration image
+  const [inspirationImage, setInspirationImage] = useState<File | null>(null)
+  const [inspirationPreview, setInspirationPreview] = useState<string | null>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+
   useEffect(() => {
-    const fetch = async () => {
+    const fetchData = async () => {
       const { data: bakerData } = await supabase
         .from('baker_profiles').select('*').eq('slug', slug).single()
       if (!bakerData) { router.push('/'); return }
@@ -86,8 +100,23 @@ export default function ProductPage() {
 
       setLoading(false)
     }
-    fetch()
+    fetchData()
   }, [slug, productId])
+
+  const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    setInspirationImage(file)
+    const reader = new FileReader()
+    reader.onloadend = () => setInspirationPreview(reader.result as string)
+    reader.readAsDataURL(file)
+  }
+
+  const removeImage = () => {
+    setInspirationImage(null)
+    setInspirationPreview(null)
+    if (fileInputRef.current) fileInputRef.current.value = ''
+  }
 
   if (loading || !product) return (
     <div className="min-h-screen flex items-center justify-center bg-[#f8f6f6]">
@@ -96,10 +125,16 @@ export default function ProductPage() {
   )
 
   const accent = product.baker.accent_color || '#111111'
-  const sponges = product.flavours.filter(f => f.type === 'flavour' || !f.type)
-  const fillings = product.flavours.filter(f => f.type === 'filling')
-  const frostings = product.flavours.filter(f => f.type === 'frosting')
+
+  // Sorted flavour groups — free items first
+  const sponges = sortFlavours(product.flavours.filter(f => f.type === 'flavour' || !f.type))
+  const fillings = sortFlavours(product.flavours.filter(f => f.type === 'filling'))
+  const frostings = sortFlavours(product.flavours.filter(f => f.type === 'frosting'))
+
   const isCustom = product.product_type === 'custom' || product.is_enquiry_only
+
+  // Layers options: only show for tiered/layer cake types
+  const showLayers = ['layer_cake', 'tiered_cake', 'cake'].includes(product.product_type)
 
   // Price calculation
   const basePrice = selectedSize?.price || (product.sizes[0]?.price ?? 0)
@@ -139,6 +174,7 @@ export default function ProductPage() {
       is_enquiry_only: product.is_enquiry_only,
       size_id: selectedSize?.id || null,
       size_label: selectedSize?.label || '',
+      layers: showLayers ? selectedLayers : null,
       flavour_id: selectedFlavour?.id || null,
       flavour_name: selectedFlavour?.name || '',
       filling_id: selectedFilling?.id || null,
@@ -147,6 +183,7 @@ export default function ProductPage() {
       frosting_name: selectedFrosting?.name || '',
       enquiry_text: enquiryText,
       notes,
+      inspiration_image: inspirationPreview || null,
       addons: selectedAddons.map(({ addon, qty }) => ({
         addon_id: addon.id, addon_name: addon.name, quantity: qty, price: addon.price,
       })),
@@ -158,6 +195,33 @@ export default function ProductPage() {
     setAdded(true)
     setTimeout(() => router.push(`/${slug}`), 1200)
   }
+
+  // Reusable styled select
+  const StyledSelect = ({
+    value, onChange, children, placeholder,
+  }: {
+    value: string
+    onChange: (val: string) => void
+    children: React.ReactNode
+    placeholder: string
+  }) => (
+    <div className="relative">
+      <select
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        className="w-full h-12 px-4 rounded-xl border border-slate-200 bg-slate-50 text-slate-900 text-sm appearance-none focus:outline-none pr-10"
+        style={{ WebkitAppearance: 'none' }}
+      >
+        <option value="">{placeholder}</option>
+        {children}
+      </select>
+      <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none">
+        <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+        </svg>
+      </div>
+    </div>
+  )
 
   return (
     <div className="min-h-screen bg-[#f8f6f6] font-sans">
@@ -222,131 +286,115 @@ export default function ProductPage() {
                   onChange={e => setEnquiryText(e.target.value)}
                   rows={4}
                   className="w-full px-4 py-3 rounded-xl border border-slate-200 text-sm focus:outline-none bg-slate-50 resize-none"
-                  style={{ '--tw-ring-color': accent } as any}
                 />
               </div>
             ) : (
               <>
-                {/* Size selection — pill grid */}
+                {/* ── Size dropdown ── */}
                 {product.sizes.length > 0 && (
                   <div>
-                    <h3 className="text-sm font-bold text-slate-900 mb-3 flex items-center gap-2">
+                    <h3 className="text-sm font-bold text-slate-900 mb-2 flex items-center gap-2">
                       <span style={{ color: accent }}>◆</span>
                       {['cupcakes', 'bento'].includes(product.product_type) ? 'Quantity' : 'Select Size'}
+                      <span className="text-red-400">*</span>
                     </h3>
-                    <div className="grid grid-cols-3 gap-2.5">
-                      {product.sizes.map(size => {
-                        const isSelected = selectedSize?.id === size.id
-                        return (
-                          <button key={size.id}
-                            onClick={() => setSelectedSize(isSelected ? null : size)}
-                            className="flex flex-col items-center justify-center p-3 rounded-xl border-2 transition-all"
-                            style={isSelected
-                              ? { borderColor: accent, backgroundColor: `${accent}10` }
-                              : { borderColor: '#e5e7eb', backgroundColor: '#f9fafb' }}>
-                            <span className="text-sm font-bold" style={isSelected ? { color: accent } : { color: '#111' }}>
-                              {size.label}
-                            </span>
-                            {size.servings && (
-                              <span className="text-[10px] mt-0.5" style={isSelected ? { color: `${accent}99` } : { color: '#9ca3af' }}>
-                                Feeds {size.servings}
-                              </span>
-                            )}
-                            <span className="text-[11px] font-semibold mt-1" style={isSelected ? { color: accent } : { color: '#6b7280' }}>
-                              £{size.price}
-                            </span>
-                          </button>
-                        )
-                      })}
-                    </div>
+                    <StyledSelect
+                      value={selectedSize?.id || ''}
+                      onChange={val => setSelectedSize(product.sizes.find(s => s.id === val) || null)}
+                      placeholder="Choose a size..."
+                    >
+                      {product.sizes.map(size => (
+                        <option key={size.id} value={size.id}>
+                          {size.label}
+                          {size.servings ? ` — Feeds ${size.servings}` : ''}
+                          {' — '}£{size.price}
+                        </option>
+                      ))}
+                    </StyledSelect>
                   </div>
                 )}
 
-                {/* Sponge flavour dropdown */}
+                {/* ── Layers dropdown ── */}
+                {showLayers && (
+                  <div>
+                    <h3 className="text-sm font-bold text-slate-900 mb-2 flex items-center gap-2">
+                      <span style={{ color: accent }}>◆</span> Number of Layers
+                    </h3>
+                    <StyledSelect
+                      value={String(selectedLayers)}
+                      onChange={val => setSelectedLayers(Number(val))}
+                      placeholder=""
+                    >
+                      {[1, 2, 3, 4, 5].map(n => (
+                        <option key={n} value={n}>
+                          {n} {n === 1 ? 'Layer' : 'Layers'}
+                        </option>
+                      ))}
+                    </StyledSelect>
+                  </div>
+                )}
+
+                {/* ── Sponge flavour dropdown (free first) ── */}
                 {sponges.length > 0 && (
                   <div>
                     <h3 className="text-sm font-bold text-slate-900 mb-2 flex items-center gap-2">
                       <span style={{ color: accent }}>◆</span> Sponge Flavour
                     </h3>
-                    <div className="relative">
-                      <select
-                        value={selectedFlavour?.id || ''}
-                        onChange={e => setSelectedFlavour(sponges.find(f => f.id === e.target.value) || null)}
-                        className="w-full h-12 px-4 rounded-xl border border-slate-200 bg-slate-50 text-slate-900 text-sm appearance-none focus:outline-none pr-10"
-                      >
-                        <option value="">Select flavour...</option>
-                        {sponges.map(f => (
-                          <option key={f.id} value={f.id}>
-                            {f.name}{f.price_adjustment > 0 ? ` (+£${f.price_adjustment})` : ''}
-                          </option>
-                        ))}
-                      </select>
-                      <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none">
-                        <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                        </svg>
-                      </div>
-                    </div>
+                    <StyledSelect
+                      value={selectedFlavour?.id || ''}
+                      onChange={val => setSelectedFlavour(sponges.find(f => f.id === val) || null)}
+                      placeholder="Select flavour..."
+                    >
+                      {sponges.map(f => (
+                        <option key={f.id} value={f.id}>
+                          {f.name}{f.price_adjustment > 0 ? ` (+£${f.price_adjustment})` : ''}
+                        </option>
+                      ))}
+                    </StyledSelect>
                   </div>
                 )}
 
-                {/* Filling dropdown */}
+                {/* ── Filling dropdown (free first) ── */}
                 {fillings.length > 0 && (
                   <div>
                     <h3 className="text-sm font-bold text-slate-900 mb-2 flex items-center gap-2">
                       <span style={{ color: accent }}>◆</span> Filling
                     </h3>
-                    <div className="relative">
-                      <select
-                        value={selectedFilling?.id || ''}
-                        onChange={e => setSelectedFilling(fillings.find(f => f.id === e.target.value) || null)}
-                        className="w-full h-12 px-4 rounded-xl border border-slate-200 bg-slate-50 text-slate-900 text-sm appearance-none focus:outline-none pr-10"
-                      >
-                        <option value="">Select filling...</option>
-                        {fillings.map(f => (
-                          <option key={f.id} value={f.id}>
-                            {f.name}{f.price_adjustment > 0 ? ` (+£${f.price_adjustment})` : ''}
-                          </option>
-                        ))}
-                      </select>
-                      <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none">
-                        <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                        </svg>
-                      </div>
-                    </div>
+                    <StyledSelect
+                      value={selectedFilling?.id || ''}
+                      onChange={val => setSelectedFilling(fillings.find(f => f.id === val) || null)}
+                      placeholder="Select filling..."
+                    >
+                      {fillings.map(f => (
+                        <option key={f.id} value={f.id}>
+                          {f.name}{f.price_adjustment > 0 ? ` (+£${f.price_adjustment})` : ''}
+                        </option>
+                      ))}
+                    </StyledSelect>
                   </div>
                 )}
 
-                {/* Frosting dropdown */}
+                {/* ── Frosting dropdown (free first) ── */}
                 {frostings.length > 0 && (
                   <div>
                     <h3 className="text-sm font-bold text-slate-900 mb-2 flex items-center gap-2">
                       <span style={{ color: accent }}>◆</span> Frosting
                     </h3>
-                    <div className="relative">
-                      <select
-                        value={selectedFrosting?.id || ''}
-                        onChange={e => setSelectedFrosting(frostings.find(f => f.id === e.target.value) || null)}
-                        className="w-full h-12 px-4 rounded-xl border border-slate-200 bg-slate-50 text-slate-900 text-sm appearance-none focus:outline-none pr-10"
-                      >
-                        <option value="">Select frosting...</option>
-                        {frostings.map(f => (
-                          <option key={f.id} value={f.id}>
-                            {f.name}{f.price_adjustment > 0 ? ` (+£${f.price_adjustment})` : ''}
-                          </option>
-                        ))}
-                      </select>
-                      <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none">
-                        <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                        </svg>
-                      </div>
-                    </div>
+                    <StyledSelect
+                      value={selectedFrosting?.id || ''}
+                      onChange={val => setSelectedFrosting(frostings.find(f => f.id === val) || null)}
+                      placeholder="Select frosting..."
+                    >
+                      {frostings.map(f => (
+                        <option key={f.id} value={f.id}>
+                          {f.name}{f.price_adjustment > 0 ? ` (+£${f.price_adjustment})` : ''}
+                        </option>
+                      ))}
+                    </StyledSelect>
                   </div>
                 )}
 
-                {/* Character/theme for character cakes */}
+                {/* ── Character / theme for character cakes ── */}
                 {product.product_type === 'character_cake' && (
                   <div>
                     <h3 className="text-sm font-bold text-slate-900 mb-2 flex items-center gap-2">
@@ -360,7 +408,7 @@ export default function ProductPage() {
                   </div>
                 )}
 
-                {/* Add-ons */}
+                {/* ── Add-ons ── */}
                 {product.addons.length > 0 && (
                   <div>
                     <h3 className="text-sm font-bold text-slate-900 mb-3 flex items-center gap-2">
@@ -407,7 +455,54 @@ export default function ProductPage() {
                   </div>
                 )}
 
-                {/* Notes */}
+                {/* ── Inspiration Image Upload ── */}
+                <div>
+                  <h3 className="text-sm font-bold text-slate-900 mb-2 flex items-center gap-2">
+                    <span style={{ color: accent }}>◆</span> Inspiration Photo
+                    <span className="text-xs font-normal text-slate-400">(optional)</span>
+                  </h3>
+
+                  {inspirationPreview ? (
+                    <div className="relative rounded-xl overflow-hidden border border-slate-200">
+                      <img
+                        src={inspirationPreview}
+                        alt="Inspiration"
+                        className="w-full max-h-56 object-cover"
+                      />
+                      <button
+                        onClick={removeImage}
+                        className="absolute top-2 right-2 w-8 h-8 rounded-full bg-black/60 text-white flex items-center justify-center hover:bg-black/80 transition-colors"
+                      >
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => fileInputRef.current?.click()}
+                      className="w-full flex flex-col items-center justify-center gap-2 px-4 py-6 rounded-xl border-2 border-dashed border-slate-200 bg-slate-50 hover:bg-slate-100 transition-colors text-slate-400 hover:text-slate-500"
+                    >
+                      <svg className="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
+                          d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                      </svg>
+                      <span className="text-sm font-medium">Upload inspiration image</span>
+                      <span className="text-xs">JPG, PNG, WEBP up to 10MB</span>
+                    </button>
+                  )}
+
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept="image/jpeg,image/png,image/webp"
+                    onChange={handleImageChange}
+                    className="hidden"
+                  />
+                </div>
+
+                {/* ── Customisation Notes ── */}
                 <div>
                   <h3 className="text-sm font-bold text-slate-900 mb-2 flex items-center gap-2">
                     <span style={{ color: accent }}>◆</span> Customisation Notes
