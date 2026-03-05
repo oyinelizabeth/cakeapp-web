@@ -18,55 +18,54 @@ type Baker = {
   accent_color: string
 }
 
-type RawSize = {
-  id: string
-  label: string
-  price: number
-  servings?: number
-  variant_group?: string | null
-  sort_order: number
-}
+type ProductType =
+  | 'round_cake' | 'square_cake' | 'heart_cake' | 'cupcakes'
+  | 'bento' | 'character_cake' | 'drip_cake' | 'set_menu' | 'custom'
+
+type Size = { id: string; label: string; price: number; servings?: number; sort_order: number }
 
 type Product = {
   id: string
   name: string
   description: string
-  category: string
-  sizes: RawSize[]
+  product_type: ProductType
+  is_enquiry_only: boolean
+  sizes: Size[]
+  excluded_flavour_ids: string[]
+  excluded_addon_ids: string[]
 }
 
-type Flavour = {
-  id: string
-  name: string
-  price_adjustment: number
-  type: 'flavour' | 'filling' | 'frosting'
-}
-
-type Addon = {
-  id: string
-  name: string
-  price: number
-  price_note: string
-  is_required: boolean
-  allow_quantity: boolean
-}
+type Flavour = { id: string; name: string; price_adjustment: number; type: string }
+type Addon = { id: string; name: string; price: number; price_note: string; is_required: boolean; allow_quantity: boolean }
 
 type OrderItem = {
   product_id: string
   product_name: string
-  // keyed by group name (or '__flat__' for ungrouped)
-  size_selections: Record<string, string> // group -> size id
+  product_type: ProductType
+  is_enquiry_only: boolean
+  size_id: string
+  size_label: string
   flavour_id: string
   flavour_name: string
   filling_id: string
   filling_name: string
   frosting_id: string
   frosting_name: string
+  enquiry_text: string
   notes: string
   addons: { addon_id: string; addon_name: string; quantity: number; price: number }[]
 }
 
 const STEPS = ['Products', 'Details', 'Review']
+
+const CAKE_TYPES: ProductType[] = ['round_cake', 'square_cake', 'heart_cake', 'character_cake', 'drip_cake', 'set_menu']
+const CUPCAKE_TYPES: ProductType[] = ['cupcakes', 'bento']
+
+const TYPE_LABELS: Record<ProductType, string> = {
+  round_cake: 'Round Cake', square_cake: 'Square Cake', heart_cake: 'Heart Cake',
+  cupcakes: 'Cupcakes', bento: 'Bento Cake', character_cake: 'Character Cake',
+  drip_cake: 'Drip Cake', set_menu: 'Cake Set / Bundle', custom: 'Custom Order',
+}
 
 export default function OrderPage() {
   const params = useParams()
@@ -109,10 +108,22 @@ export default function OrderPage() {
         supabase.from('addons').select('*').eq('baker_id', bakerData.id).eq('is_active', true).order('name'),
       ])
 
-      setProducts((productsRes.data || []).map((p: any) => ({
-        ...p,
-        sizes: (p.sizes || []).sort((a: RawSize, b: RawSize) => a.sort_order - b.sort_order)
-      })))
+      // Fetch per-product overrides
+      const prods = productsRes.data || []
+      const withOverrides = await Promise.all(prods.map(async (p: any) => {
+        const [fOverrides, aOverrides] = await Promise.all([
+          supabase.from('product_flavour_overrides').select('flavour_id').eq('product_id', p.id).eq('is_excluded', true),
+          supabase.from('product_addon_overrides').select('addon_id').eq('product_id', p.id).eq('is_excluded', true),
+        ])
+        return {
+          ...p,
+          sizes: (p.sizes || []).sort((a: Size, b: Size) => a.sort_order - b.sort_order),
+          excluded_flavour_ids: (fOverrides.data || []).map((r: any) => r.flavour_id),
+          excluded_addon_ids: (aOverrides.data || []).map((r: any) => r.addon_id),
+        }
+      }))
+
+      setProducts(withOverrides)
       setFlavours(flavoursRes.data || [])
       setAddons(addonsRes.data || [])
       setLoading(false)
@@ -120,45 +131,29 @@ export default function OrderPage() {
     fetchData()
   }, [slug])
 
-  // Split sizes into groups. Ungrouped go under '__flat__'
-  const getSizeGroups = (sizes: RawSize[]): Record<string, RawSize[]> => {
-    const groups: Record<string, RawSize[]> = {}
-    sizes.forEach(s => {
-      const key = s.variant_group || '__flat__'
-      if (!groups[key]) groups[key] = []
-      groups[key].push(s)
-    })
-    return groups
-  }
+  // Filter flavours/addons for a specific product
+  const getProductFlavours = (product: Product, type: string) =>
+    flavours.filter(f => f.type === type && !product.excluded_flavour_ids.includes(f.id))
 
-  const isProductComplete = (item: OrderItem, product: Product): boolean => {
-    const groups = getSizeGroups(product.sizes)
-    for (const key of Object.keys(groups)) {
-      if (!item.size_selections[key]) return false
-    }
-    return true
-  }
+  const getProductAddons = (product: Product) =>
+    addons.filter(a => !product.excluded_addon_ids.includes(a.id))
 
-  const validateStep0 = () =>
-    orderItems.length > 0 &&
-    orderItems.every(item => {
-      const product = products.find(p => p.id === item.product_id)
-      return product ? isProductComplete(item, product) : false
-    })
+  // ── Order item management ──────────────────────────────────────────────────
 
   const addProduct = (product: Product) => {
     if (orderItems.find(i => i.product_id === product.id)) return
     setOrderItems([...orderItems, {
       product_id: product.id,
       product_name: product.name,
-      size_selections: {},
+      product_type: product.product_type,
+      is_enquiry_only: product.is_enquiry_only,
+      size_id: '', size_label: '',
       flavour_id: '', flavour_name: '',
       filling_id: '', filling_name: '',
       frosting_id: '', frosting_name: '',
-      notes: '',
-      addons: addons.filter(a => a.is_required).map(a => ({
-        addon_id: a.id, addon_name: a.name, quantity: 1, price: a.price,
-      })),
+      enquiry_text: '', notes: '',
+      addons: addons.filter(a => a.is_required && !product.excluded_addon_ids.includes(a.id))
+        .map(a => ({ addon_id: a.id, addon_name: a.name, quantity: 1, price: a.price })),
     }])
   }
 
@@ -167,22 +162,6 @@ export default function OrderPage() {
 
   const updateItem = (product_id: string, updates: Partial<OrderItem>) =>
     setOrderItems(orderItems.map(i => i.product_id === product_id ? { ...i, ...updates } : i))
-
-  const setSizeSelection = (item: OrderItem, groupKey: string, sizeId: string) =>
-    updateItem(item.product_id, {
-      size_selections: { ...item.size_selections, [groupKey]: sizeId }
-    })
-
-  const getSelectedSizeLabel = (item: OrderItem, product: Product): string => {
-    const groups = getSizeGroups(product.sizes)
-    return Object.entries(item.size_selections)
-      .map(([key, sizeId]) => {
-        const size = groups[key]?.find(s => s.id === sizeId)
-        return size ? size.label : ''
-      })
-      .filter(Boolean)
-      .join(', ')
-  }
 
   const toggleAddon = (item: OrderItem, addon: Addon) => {
     const existing = item.addons.find(a => a.addon_id === addon.id)
@@ -201,12 +180,29 @@ export default function OrderPage() {
       addons: item.addons.map(a => a.addon_id === addon_id ? { ...a, quantity: Math.max(1, qty) } : a)
     })
 
+  // ── Validation ─────────────────────────────────────────────────────────────
+
+  const isItemValid = (item: OrderItem) => {
+    if (item.is_enquiry_only) return item.enquiry_text.trim().length > 0
+    const product = products.find(p => p.id === item.product_id)
+    if (!product) return false
+    if (product.sizes.length > 0 && !item.size_id) return false
+    return true
+  }
+
+  const validateStep0 = () =>
+    orderItems.length > 0 && orderItems.every(isItemValid)
+
+  // ── Image upload ───────────────────────────────────────────────────────────
+
   const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file) return
     setInspoImage(file)
     setInspoPreview(URL.createObjectURL(file))
   }
+
+  // ── Submit ─────────────────────────────────────────────────────────────────
 
   const handleSubmit = async () => {
     if (!baker || !customerName || !customerEmail || !eventDate || orderItems.length === 0) return
@@ -247,22 +243,24 @@ export default function OrderPage() {
       }
 
       for (const item of orderItems) {
-        const product = products.find(p => p.id === item.product_id)
-        const sizeLabel = product ? getSelectedSizeLabel(item, product) : ''
         const flavourParts = [
           item.flavour_name,
           item.filling_name ? `${item.filling_name} filling` : '',
           item.frosting_name ? `${item.frosting_name} frosting` : '',
         ].filter(Boolean).join(', ')
 
+        const itemNotes = item.is_enquiry_only
+          ? item.enquiry_text
+          : [item.notes, item.enquiry_text].filter(Boolean).join(' — ')
+
         const { data: orderItem } = await supabase.from('order_items').insert({
           order_id: order.id,
           product_id: item.product_id,
           product_name: item.product_name,
           quantity: 1,
-          size: sizeLabel,
+          size: item.size_label,
           flavour: flavourParts,
-          notes: item.notes,
+          notes: itemNotes,
         }).select().single()
 
         if (orderItem && item.addons.length > 0) {
@@ -292,15 +290,22 @@ export default function OrderPage() {
     return d.toISOString().split('T')[0]
   }
 
-  const spongeFlavours = flavours.filter(f => f.type === 'flavour' || !f.type)
-  const fillings = flavours.filter(f => f.type === 'filling')
-  const frostings = flavours.filter(f => f.type === 'frosting')
+  // ── Group products by type ─────────────────────────────────────────────────
+
+  const groupedProducts = products.reduce((acc, p) => {
+    const label = TYPE_LABELS[p.product_type] || 'Other'
+    if (!acc[label]) acc[label] = []
+    acc[label].push(p)
+    return acc
+  }, {} as Record<string, Product[]>)
 
   if (loading) return (
     <div className="min-h-screen flex items-center justify-center">
       <div className="text-gray-400 text-sm">Loading...</div>
     </div>
   )
+
+  // ── Render ─────────────────────────────────────────────────────────────────
 
   return (
     <main className="min-h-screen bg-white">
@@ -309,9 +314,7 @@ export default function OrderPage() {
         <div className="max-w-2xl mx-auto px-4 py-4">
           <div className="flex items-center justify-between mb-3">
             <button onClick={() => step > 0 ? setStep(step - 1) : router.back()}
-              className="text-gray-400 hover:text-gray-600 font-semibold text-sm">
-              ← Back
-            </button>
+              className="text-gray-400 hover:text-gray-600 font-semibold text-sm">← Back</button>
             <h1 className="font-extrabold text-gray-900">{baker?.business_name}</h1>
             <div className="text-sm text-gray-400">{step + 1} / {STEPS.length}</div>
           </div>
@@ -329,210 +332,272 @@ export default function OrderPage() {
 
       <div className="max-w-2xl mx-auto px-4 py-8 pb-32">
 
-        {/* STEP 0: Products */}
+        {/* ── STEP 0: Products ── */}
         {step === 0 && (
           <div>
             <h2 className="text-2xl font-extrabold text-gray-900 mb-1">What would you like?</h2>
-            <p className="text-gray-500 text-sm mb-6">Select a product and choose your options.</p>
+            <p className="text-gray-500 text-sm mb-6">Select a product and fill in your preferences.</p>
 
-            {products.map(product => {
-              const selected = orderItems.find(i => i.product_id === product.id)
-              const sizeGroups = getSizeGroups(product.sizes)
+            {Object.entries(groupedProducts).map(([category, categoryProducts]) => (
+              <div key={category} className="mb-6">
+                <p className="text-xs font-bold text-gray-400 uppercase tracking-widest mb-3">{category}</p>
+                {categoryProducts.map(product => {
+                  const selected = orderItems.find(i => i.product_id === product.id)
+                  const productFlavours = getProductFlavours(product, 'flavour')
+                  const productFillings = getProductFlavours(product, 'filling')
+                  const productFrostings = getProductFlavours(product, 'frosting')
+                  const productAddons = getProductAddons(product)
+                  const isCake = CAKE_TYPES.includes(product.product_type)
+                  const isCupcake = CUPCAKE_TYPES.includes(product.product_type)
+                  const isCustom = product.product_type === 'custom' || product.is_enquiry_only
+                  const valid = selected ? isItemValid(selected) : false
 
-              return (
-                <div key={product.id} className={`mb-4 border-2 rounded-2xl overflow-hidden transition-all ${selected ? 'border-gray-900' : 'border-gray-100'}`}>
-                  {/* Product header */}
-                  <button
-                    onClick={() => selected ? removeProduct(product.id) : addProduct(product)}
-                    className="w-full flex items-center justify-between p-4 text-left"
-                  >
-                    <div>
-                      <p className="font-bold text-gray-900">{product.name}</p>
-                      {product.description && <p className="text-sm text-gray-400 mt-0.5">{product.description}</p>}
-                      {product.sizes.length > 0 && (
-                        <p className="text-xs text-gray-400 mt-1">
-                          From £{Math.min(...product.sizes.map(s => s.price))}
-                        </p>
-                      )}
-                    </div>
-                    <div className={`w-6 h-6 rounded-full border-2 flex items-center justify-center shrink-0 ml-4 transition-all ${selected ? 'border-gray-900' : 'border-gray-200'}`}
-                      style={selected ? { backgroundColor: accent, borderColor: accent } : {}}>
+                  return (
+                    <div key={product.id} className={`mb-3 border-2 rounded-2xl overflow-hidden transition-all ${selected ? 'border-gray-900' : 'border-gray-100'}`}>
+                      {/* Product header — tap to select/deselect */}
+                      <button
+                        onClick={() => selected ? removeProduct(product.id) : addProduct(product)}
+                        className="w-full flex items-center justify-between p-4 text-left"
+                      >
+                        <div className="flex-1">
+                          <p className="font-bold text-gray-900">{product.name}</p>
+                          {product.description && <p className="text-sm text-gray-400 mt-0.5">{product.description}</p>}
+                          {product.is_enquiry_only
+                            ? <p className="text-xs text-gray-400 mt-1">Enquiry — describe what you want</p>
+                            : product.sizes.length > 0 && (
+                              <p className="text-xs text-gray-400 mt-1">From £{Math.min(...product.sizes.map(s => s.price))}</p>
+                            )
+                          }
+                        </div>
+                        <div className={`w-6 h-6 rounded-full border-2 flex items-center justify-center shrink-0 ml-4 transition-all ${selected ? 'border-gray-900' : 'border-gray-200'}`}
+                          style={selected ? { backgroundColor: accent, borderColor: accent } : {}}>
+                          {selected && (
+                            <svg className="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
+                            </svg>
+                          )}
+                        </div>
+                      </button>
+
+                      {/* Expanded options */}
                       {selected && (
-                        <svg className="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
-                        </svg>
-                      )}
-                    </div>
-                  </button>
+                        <div className="border-t border-gray-100 bg-gray-50 p-4 space-y-4">
 
-                  {/* Expanded options */}
-                  {selected && (
-                    <div className="border-t border-gray-100 bg-gray-50 p-4 space-y-4">
-
-                      {/* One dropdown per size group */}
-                      {Object.entries(sizeGroups).map(([groupKey, groupSizes]) => {
-                        const label = groupKey === '__flat__' ? 'Size / Quantity' : groupKey
-                        const selectedId = selected.size_selections[groupKey] || ''
-                        const missing = !selectedId
-
-                        return (
-                          <div key={groupKey}>
-                            <div className="flex items-center justify-between mb-1.5">
+                          {/* Custom / enquiry only — just a text area */}
+                          {isCustom ? (
+                            <div>
                               <label className="text-xs font-bold text-gray-500 uppercase tracking-wide">
-                                {label} <span className="text-red-400">*</span>
+                                Describe what you want <span className="text-red-400">*</span>
                               </label>
-                              {missing && <span className="text-xs text-red-400 font-semibold">Required</span>}
+                              <textarea
+                                placeholder="e.g. A 3-tier wedding cake with floral decorations, pastel colours, serves 80 people..."
+                                value={selected.enquiry_text}
+                                onChange={e => updateItem(product.id, { enquiry_text: e.target.value })}
+                                rows={4}
+                                className="w-full mt-2 px-4 py-3 rounded-xl border border-gray-200 text-sm focus:outline-none focus:border-gray-400 bg-white resize-none"
+                              />
                             </div>
-                            <div className="relative">
-                              <select
-                                value={selectedId}
-                                onChange={e => setSizeSelection(selected, groupKey, e.target.value)}
-                                className={`w-full appearance-none bg-white border-2 rounded-xl px-4 py-3 text-sm font-medium focus:outline-none pr-10 ${missing ? 'border-red-200' : selectedId ? 'border-gray-900' : 'border-gray-200'}`}
-                                style={selectedId ? { borderColor: accent } : {}}
-                              >
-                                <option value="">Select {label}...</option>
-                                {groupSizes.map(size => (
-                                  <option key={size.id} value={size.id}>
-                                    {size.label}
-                                    {size.servings ? ` — serves ${size.servings}` : ''}
-                                    {' '}— £{size.price}
-                                  </option>
-                                ))}
-                              </select>
-                              <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none">
-                                <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                                </svg>
-                              </div>
-                            </div>
-                          </div>
-                        )
-                      })}
-
-                      {/* Sponge Flavour */}
-                      {spongeFlavours.length > 0 && (
-                        <div>
-                          <label className="text-xs font-bold text-gray-500 uppercase tracking-wide">Sponge Flavour</label>
-                          <div className="flex flex-wrap gap-2 mt-2">
-                            {spongeFlavours.map(f => (
-                              <button key={f.id}
-                                onClick={() => updateItem(product.id, {
-                                  flavour_id: selected.flavour_id === f.id ? '' : f.id,
-                                  flavour_name: selected.flavour_id === f.id ? '' : f.name,
-                                })}
-                                className={`px-3 py-1.5 rounded-full text-sm font-semibold border-2 transition-all ${selected.flavour_id === f.id ? 'text-white' : 'bg-white text-gray-600 border-gray-200'}`}
-                                style={selected.flavour_id === f.id ? { backgroundColor: accent, borderColor: accent } : {}}>
-                                {f.name}{f.price_adjustment > 0 ? ` +£${f.price_adjustment}` : ''}
-                              </button>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-
-                      {/* Filling */}
-                      {fillings.length > 0 && (
-                        <div>
-                          <label className="text-xs font-bold text-gray-500 uppercase tracking-wide">Filling</label>
-                          <p className="text-xs text-gray-400 mb-2">Premium fillings +£5</p>
-                          <div className="flex flex-wrap gap-2">
-                            {fillings.map(f => (
-                              <button key={f.id}
-                                onClick={() => updateItem(product.id, {
-                                  filling_id: selected.filling_id === f.id ? '' : f.id,
-                                  filling_name: selected.filling_id === f.id ? '' : f.name,
-                                })}
-                                className={`px-3 py-1.5 rounded-full text-sm font-semibold border-2 transition-all ${selected.filling_id === f.id ? 'text-white' : 'bg-white text-gray-600 border-gray-200'}`}
-                                style={selected.filling_id === f.id ? { backgroundColor: accent, borderColor: accent } : {}}>
-                                {f.name}{f.price_adjustment > 0 ? ` +£${f.price_adjustment}` : ''}
-                              </button>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-
-                      {/* Frosting */}
-                      {frostings.length > 0 && (
-                        <div>
-                          <label className="text-xs font-bold text-gray-500 uppercase tracking-wide">Frosting</label>
-                          <div className="flex flex-wrap gap-2 mt-2">
-                            {frostings.map(f => (
-                              <button key={f.id}
-                                onClick={() => updateItem(product.id, {
-                                  frosting_id: selected.frosting_id === f.id ? '' : f.id,
-                                  frosting_name: selected.frosting_id === f.id ? '' : f.name,
-                                })}
-                                className={`px-3 py-1.5 rounded-full text-sm font-semibold border-2 transition-all ${selected.frosting_id === f.id ? 'text-white' : 'bg-white text-gray-600 border-gray-200'}`}
-                                style={selected.frosting_id === f.id ? { backgroundColor: accent, borderColor: accent } : {}}>
-                                {f.name}{f.price_adjustment > 0 ? ` +£${f.price_adjustment}` : ''}
-                              </button>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-
-                      {/* Add-ons */}
-                      {addons.length > 0 && (
-                        <div>
-                          <label className="text-xs font-bold text-gray-500 uppercase tracking-wide">Add-ons</label>
-                          <div className="space-y-2 mt-2">
-                            {addons.map(addon => {
-                              const selectedAddon = selected.addons.find(a => a.addon_id === addon.id)
-                              return (
-                                <div key={addon.id} className={`flex items-center justify-between p-3 rounded-xl border-2 bg-white transition-all ${selectedAddon ? 'border-gray-900' : 'border-gray-200'}`}>
-                                  <button onClick={() => toggleAddon(selected, addon)} className="flex items-center gap-3 flex-1 text-left">
-                                    <div className={`w-5 h-5 rounded border-2 flex items-center justify-center shrink-0 ${selectedAddon ? '' : 'border-gray-300'}`}
-                                      style={selectedAddon ? { backgroundColor: accent, borderColor: accent } : {}}>
-                                      {selectedAddon && (
-                                        <svg className="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
-                                        </svg>
-                                      )}
+                          ) : (
+                            <>
+                              {/* Size dropdown */}
+                              {product.sizes.length > 0 && (
+                                <div>
+                                  <div className="flex items-center justify-between mb-1.5">
+                                    <label className="text-xs font-bold text-gray-500 uppercase tracking-wide">
+                                      {isCupcake ? 'Quantity' : 'Size'} <span className="text-red-400">*</span>
+                                    </label>
+                                    {!selected.size_id && (
+                                      <span className="text-xs text-red-400 font-semibold">Required</span>
+                                    )}
+                                  </div>
+                                  <div className="relative">
+                                    <select
+                                      value={selected.size_id}
+                                      onChange={e => {
+                                        const size = product.sizes.find(s => s.id === e.target.value)
+                                        updateItem(product.id, {
+                                          size_id: e.target.value,
+                                          size_label: size?.label || '',
+                                        })
+                                      }}
+                                      className="w-full appearance-none bg-white border-2 rounded-xl px-4 py-3 text-sm font-medium focus:outline-none pr-10"
+                                      style={{ borderColor: selected.size_id ? accent : '#e5e7eb' }}
+                                    >
+                                      <option value="">Select {isCupcake ? 'quantity' : 'size'}...</option>
+                                      {product.sizes.map(size => (
+                                        <option key={size.id} value={size.id}>
+                                          {size.label}
+                                          {size.servings ? ` — serves ${size.servings}` : ''}
+                                          {' '}— £{size.price}
+                                        </option>
+                                      ))}
+                                    </select>
+                                    <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none">
+                                      <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                                      </svg>
                                     </div>
-                                    <div>
-                                      <p className="text-sm font-semibold text-gray-900">{addon.name}</p>
-                                      <p className="text-xs text-gray-400">
-                                        £{addon.price}{addon.allow_quantity ? ' each' : ''}
-                                        {addon.is_required && <span className="ml-1 text-orange-500">· Required</span>}
-                                      </p>
-                                    </div>
-                                  </button>
-                                  {selectedAddon && addon.allow_quantity && (
-                                    <div className="flex items-center gap-2">
-                                      <button onClick={() => updateAddonQty(selected, addon.id, selectedAddon.quantity - 1)}
-                                        className="w-7 h-7 rounded-full bg-gray-100 font-bold text-gray-900 text-sm flex items-center justify-center">−</button>
-                                      <span className="font-bold text-sm w-4 text-center">{selectedAddon.quantity}</span>
-                                      <button onClick={() => updateAddonQty(selected, addon.id, selectedAddon.quantity + 1)}
-                                        className="w-7 h-7 rounded-full text-white text-sm flex items-center justify-center font-bold"
-                                        style={{ backgroundColor: accent }}>+</button>
-                                    </div>
-                                  )}
+                                  </div>
                                 </div>
-                              )
-                            })}
-                          </div>
+                              )}
+
+                              {/* Sponge flavour */}
+                              {productFlavours.length > 0 && (
+                                <div>
+                                  <label className="text-xs font-bold text-gray-500 uppercase tracking-wide">Sponge Flavour</label>
+                                  <div className="flex flex-wrap gap-2 mt-2">
+                                    {productFlavours.map(f => (
+                                      <button key={f.id}
+                                        onClick={() => updateItem(product.id, {
+                                          flavour_id: selected.flavour_id === f.id ? '' : f.id,
+                                          flavour_name: selected.flavour_id === f.id ? '' : f.name,
+                                        })}
+                                        className="px-3 py-1.5 rounded-full text-sm font-semibold border-2 transition-all"
+                                        style={selected.flavour_id === f.id
+                                          ? { backgroundColor: accent, borderColor: accent, color: '#fff' }
+                                          : { backgroundColor: '#fff', borderColor: '#e5e7eb', color: '#374151' }}>
+                                        {f.name}{f.price_adjustment > 0 ? ` +£${f.price_adjustment}` : ''}
+                                      </button>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+
+                              {/* Filling */}
+                              {productFillings.length > 0 && (
+                                <div>
+                                  <label className="text-xs font-bold text-gray-500 uppercase tracking-wide">Filling</label>
+                                  <div className="flex flex-wrap gap-2 mt-2">
+                                    {productFillings.map(f => (
+                                      <button key={f.id}
+                                        onClick={() => updateItem(product.id, {
+                                          filling_id: selected.filling_id === f.id ? '' : f.id,
+                                          filling_name: selected.filling_id === f.id ? '' : f.name,
+                                        })}
+                                        className="px-3 py-1.5 rounded-full text-sm font-semibold border-2 transition-all"
+                                        style={selected.filling_id === f.id
+                                          ? { backgroundColor: accent, borderColor: accent, color: '#fff' }
+                                          : { backgroundColor: '#fff', borderColor: '#e5e7eb', color: '#374151' }}>
+                                        {f.name}{f.price_adjustment > 0 ? ` +£${f.price_adjustment}` : ''}
+                                      </button>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+
+                              {/* Frosting */}
+                              {productFrostings.length > 0 && (
+                                <div>
+                                  <label className="text-xs font-bold text-gray-500 uppercase tracking-wide">Frosting</label>
+                                  <div className="flex flex-wrap gap-2 mt-2">
+                                    {productFrostings.map(f => (
+                                      <button key={f.id}
+                                        onClick={() => updateItem(product.id, {
+                                          frosting_id: selected.frosting_id === f.id ? '' : f.id,
+                                          frosting_name: selected.frosting_id === f.id ? '' : f.name,
+                                        })}
+                                        className="px-3 py-1.5 rounded-full text-sm font-semibold border-2 transition-all"
+                                        style={selected.frosting_id === f.id
+                                          ? { backgroundColor: accent, borderColor: accent, color: '#fff' }
+                                          : { backgroundColor: '#fff', borderColor: '#e5e7eb', color: '#374151' }}>
+                                        {f.name}{f.price_adjustment > 0 ? ` +£${f.price_adjustment}` : ''}
+                                      </button>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+
+                              {/* Character/theme field for character cakes */}
+                              {product.product_type === 'character_cake' && (
+                                <div>
+                                  <label className="text-xs font-bold text-gray-500 uppercase tracking-wide">Character / Theme</label>
+                                  <input
+                                    type="text"
+                                    placeholder="e.g. Peppa Pig, Spiderman, Princess..."
+                                    value={selected.enquiry_text}
+                                    onChange={e => updateItem(product.id, { enquiry_text: e.target.value })}
+                                    className="w-full mt-2 px-4 py-3 rounded-xl border border-gray-200 text-sm focus:outline-none focus:border-gray-400 bg-white"
+                                  />
+                                </div>
+                              )}
+
+                              {/* Add-ons */}
+                              {productAddons.length > 0 && (
+                                <div>
+                                  <label className="text-xs font-bold text-gray-500 uppercase tracking-wide">Add-ons</label>
+                                  <div className="space-y-2 mt-2">
+                                    {productAddons.map(addon => {
+                                      const selectedAddon = selected.addons.find(a => a.addon_id === addon.id)
+                                      return (
+                                        <div key={addon.id}
+                                          className="flex items-center justify-between p-3 rounded-xl border-2 bg-white transition-all"
+                                          style={{ borderColor: selectedAddon ? accent : '#e5e7eb' }}>
+                                          <button onClick={() => toggleAddon(selected, addon)} className="flex items-center gap-3 flex-1 text-left">
+                                            <div className="w-5 h-5 rounded border-2 flex items-center justify-center shrink-0"
+                                              style={selectedAddon
+                                                ? { backgroundColor: accent, borderColor: accent }
+                                                : { borderColor: '#d1d5db' }}>
+                                              {selectedAddon && (
+                                                <svg className="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
+                                                </svg>
+                                              )}
+                                            </div>
+                                            <div>
+                                              <p className="text-sm font-semibold text-gray-900">{addon.name}</p>
+                                              <p className="text-xs text-gray-400">
+                                                £{addon.price}{addon.allow_quantity ? ' each' : ''}
+                                                {addon.is_required && <span className="ml-1 text-orange-500">· Required</span>}
+                                              </p>
+                                            </div>
+                                          </button>
+                                          {selectedAddon && addon.allow_quantity && (
+                                            <div className="flex items-center gap-2">
+                                              <button onClick={() => updateAddonQty(selected, addon.id, selectedAddon.quantity - 1)}
+                                                className="w-7 h-7 rounded-full bg-gray-100 font-bold text-gray-900 text-sm flex items-center justify-center">−</button>
+                                              <span className="font-bold text-sm w-4 text-center">{selectedAddon.quantity}</span>
+                                              <button onClick={() => updateAddonQty(selected, addon.id, selectedAddon.quantity + 1)}
+                                                className="w-7 h-7 rounded-full text-white text-sm flex items-center justify-center font-bold"
+                                                style={{ backgroundColor: accent }}>+</button>
+                                            </div>
+                                          )}
+                                        </div>
+                                      )
+                                    })}
+                                  </div>
+                                </div>
+                              )}
+
+                              {/* Notes for this item */}
+                              <div>
+                                <label className="text-xs font-bold text-gray-500 uppercase tracking-wide">Notes for this item</label>
+                                <textarea
+                                  placeholder="e.g. Please write 'Happy Birthday Sarah', any special requests..."
+                                  value={selected.notes}
+                                  onChange={e => updateItem(product.id, { notes: e.target.value })}
+                                  rows={2}
+                                  className="w-full mt-2 px-4 py-2.5 rounded-xl border border-gray-200 text-sm focus:outline-none focus:border-gray-400 bg-white resize-none"
+                                />
+                              </div>
+                            </>
+                          )}
                         </div>
                       )}
-
-                      {/* Notes */}
-                      <div>
-                        <label className="text-xs font-bold text-gray-500 uppercase tracking-wide">Notes for this item</label>
-                        <textarea
-                          placeholder="e.g. Please write 'Happy Birthday Sarah' on the cake"
-                          value={selected.notes}
-                          onChange={e => updateItem(product.id, { notes: e.target.value })}
-                          rows={2}
-                          className="w-full mt-2 px-4 py-2.5 rounded-xl border border-gray-200 text-sm focus:outline-none focus:border-gray-400 bg-white resize-none"
-                        />
-                      </div>
                     </div>
-                  )}
-                </div>
-              )
-            })}
+                  )
+                })}
+              </div>
+            ))}
+
+            {/* General enquiry card */}
+            <div className="mt-2 p-4 rounded-2xl border border-gray-100 bg-gray-50 text-center">
+              <p className="text-sm font-semibold text-gray-600">Something else in mind?</p>
+              <p className="text-xs text-gray-400 mt-1">Add a Custom Order item above to describe anything that doesn't fit a standard product.</p>
+            </div>
           </div>
         )}
 
-        {/* STEP 1: Details */}
+        {/* ── STEP 1: Details ── */}
         {step === 1 && (
           <div className="space-y-5">
             <div>
@@ -566,15 +631,15 @@ export default function OrderPage() {
                 <div className="flex gap-3 mt-2">
                   {baker?.pickup_available && (
                     <button onClick={() => setCollectionType('pickup')}
-                      className={`flex-1 py-3 rounded-xl border-2 font-semibold text-sm transition-all ${collectionType === 'pickup' ? 'text-white' : 'border-gray-200 text-gray-600'}`}
-                      style={collectionType === 'pickup' ? { backgroundColor: accent, borderColor: accent } : {}}>
+                      className="flex-1 py-3 rounded-xl border-2 font-semibold text-sm transition-all"
+                      style={collectionType === 'pickup' ? { backgroundColor: accent, borderColor: accent, color: '#fff' } : { borderColor: '#e5e7eb', color: '#374151' }}>
                       Pickup
                     </button>
                   )}
                   {baker?.delivery_available && (
                     <button onClick={() => setCollectionType('delivery')}
-                      className={`flex-1 py-3 rounded-xl border-2 font-semibold text-sm transition-all ${collectionType === 'delivery' ? 'text-white' : 'border-gray-200 text-gray-600'}`}
-                      style={collectionType === 'delivery' ? { backgroundColor: accent, borderColor: accent } : {}}>
+                      className="flex-1 py-3 rounded-xl border-2 font-semibold text-sm transition-all"
+                      style={collectionType === 'delivery' ? { backgroundColor: accent, borderColor: accent, color: '#fff' } : { borderColor: '#e5e7eb', color: '#374151' }}>
                       Delivery
                     </button>
                   )}
@@ -585,8 +650,7 @@ export default function OrderPage() {
               <label className="text-xs font-bold text-gray-500 uppercase tracking-wide">Budget (optional)</label>
               <div className="relative mt-2">
                 <span className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400 font-semibold">£</span>
-                <input type="number" placeholder="0.00" value={budget}
-                  onChange={e => setBudget(e.target.value)}
+                <input type="number" placeholder="0.00" value={budget} onChange={e => setBudget(e.target.value)}
                   className="w-full pl-8 pr-4 py-3 rounded-xl border border-gray-200 text-sm focus:outline-none focus:border-gray-400" />
               </div>
             </div>
@@ -635,7 +699,7 @@ export default function OrderPage() {
           </div>
         )}
 
-        {/* STEP 2: Review */}
+        {/* ── STEP 2: Review ── */}
         {step === 2 && (
           <div>
             <h2 className="text-2xl font-extrabold text-gray-900 mb-1">Review your order</h2>
@@ -643,35 +707,30 @@ export default function OrderPage() {
 
             <div className="mb-6">
               <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wide mb-3">Order Items</h3>
-              {orderItems.map(item => {
-                const product = products.find(p => p.id === item.product_id)
-                const groups = product ? getSizeGroups(product.sizes) : {}
-                return (
-                  <div key={item.product_id} className="mb-3 p-4 rounded-xl border border-gray-100 bg-gray-50">
-                    <p className="font-bold text-gray-900">{item.product_name}</p>
-                    {Object.entries(item.size_selections).map(([groupKey, sizeId]) => {
-                      const size = groups[groupKey]?.find(s => s.id === sizeId)
-                      const label = groupKey === '__flat__' ? 'Size' : groupKey
-                      return size ? (
-                        <p key={groupKey} className="text-sm text-gray-500 mt-1">{label}: {size.label}</p>
-                      ) : null
-                    })}
-                    {item.flavour_name && <p className="text-sm text-gray-500">Sponge: {item.flavour_name}</p>}
-                    {item.filling_name && <p className="text-sm text-gray-500">Filling: {item.filling_name}</p>}
-                    {item.frosting_name && <p className="text-sm text-gray-500">Frosting: {item.frosting_name}</p>}
-                    {item.addons.length > 0 && (
-                      <div className="mt-2">
-                        {item.addons.map(a => (
-                          <p key={a.addon_id} className="text-sm text-gray-400">
-                            + {a.quantity > 1 ? `${a.quantity}x ` : ''}{a.addon_name} (£{(a.price * a.quantity).toFixed(2)})
-                          </p>
-                        ))}
-                      </div>
-                    )}
-                    {item.notes && <p className="text-sm text-gray-400 italic mt-2">"{item.notes}"</p>}
-                  </div>
-                )
-              })}
+              {orderItems.map(item => (
+                <div key={item.product_id} className="mb-3 p-4 rounded-xl border border-gray-100 bg-gray-50">
+                  <p className="font-bold text-gray-900">{item.product_name}</p>
+                  {item.size_label && <p className="text-sm text-gray-500 mt-1">Size: {item.size_label}</p>}
+                  {item.flavour_name && <p className="text-sm text-gray-500">Sponge: {item.flavour_name}</p>}
+                  {item.filling_name && <p className="text-sm text-gray-500">Filling: {item.filling_name}</p>}
+                  {item.frosting_name && <p className="text-sm text-gray-500">Frosting: {item.frosting_name}</p>}
+                  {item.enquiry_text && (
+                    <p className="text-sm text-gray-500 mt-1">
+                      {item.product_type === 'character_cake' ? `Theme: ${item.enquiry_text}` : item.enquiry_text}
+                    </p>
+                  )}
+                  {item.addons.length > 0 && (
+                    <div className="mt-2">
+                      {item.addons.map(a => (
+                        <p key={a.addon_id} className="text-sm text-gray-400">
+                          + {a.quantity > 1 ? `${a.quantity}x ` : ''}{a.addon_name} (£{(a.price * a.quantity).toFixed(2)})
+                        </p>
+                      ))}
+                    </div>
+                  )}
+                  {item.notes && <p className="text-sm text-gray-400 italic mt-2">"{item.notes}"</p>}
+                </div>
+              ))}
             </div>
 
             {inspoPreview && (
@@ -726,7 +785,7 @@ export default function OrderPage() {
               style={{ backgroundColor: accent }}>
               {orderItems.length === 0 ? 'Select a product to continue'
                 : !validateStep0() ? 'Please complete all required options'
-                : 'Continue →'}
+                : `Continue with ${orderItems.length} item${orderItems.length !== 1 ? 's' : ''} →`}
             </button>
           )}
           {step === 1 && (
