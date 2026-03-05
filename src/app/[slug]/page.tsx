@@ -2,7 +2,7 @@ import { createClient } from '@supabase/supabase-js'
 import { notFound } from 'next/navigation'
 import Link from 'next/link'
 import BasketButton from './basketbutton'
-import BakerPageClient from './BakerPageClient'
+import BakerPageClient from './bakerpageclient'
 
 type Props = { params: Promise<{ slug: string }> }
 
