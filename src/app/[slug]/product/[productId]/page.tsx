@@ -256,13 +256,6 @@ export default function ProductPage() {
             )}
           </div>
 
-          {/* ── Temporary debug banner — remove once sizes confirmed working ── */}
-          {debugInfo && (
-            <div className="mx-5 mt-3 px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-700 font-mono break-all">
-              🔍 {debugInfo}
-            </div>
-          )}
-
           <div className="px-5 space-y-6 mt-4">
             {isCustom ? (
               <div>
