@@ -1,6 +1,5 @@
 'use client'
-
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { createClient } from '@supabase/supabase-js'
 
@@ -12,7 +11,6 @@ const supabase = createClient(
 type Size = { id: string; label: string; price: number; servings?: number; sort_order: number }
 type Flavour = { id: string; name: string; price_adjustment: number; type: string }
 type Addon = { id: string; name: string; price: number; is_required: boolean; allow_quantity: boolean }
-
 type Product = {
   id: string; name: string; description: string
   product_type: string; is_enquiry_only: boolean; image_url?: string
@@ -27,6 +25,13 @@ type Product = {
   addons: Addon[]
 }
 
+// Layer options — stored as an addon or a local selection depending on your schema.
+// If you have a `layers` column on products or sizes, adapt accordingly.
+const LAYER_OPTIONS = [
+  { id: 'standard', label: 'Standard', description: 'Regular height' },
+  { id: 'tall', label: 'Tall', description: 'Extra height tier' },
+]
+
 export default function ProductPage() {
   const params = useParams()
   const router = useRouter()
@@ -39,6 +44,7 @@ export default function ProductPage() {
 
   // Selections
   const [selectedSize, setSelectedSize] = useState<Size | null>(null)
+  const [selectedLayer, setSelectedLayer] = useState<string>('')
   const [selectedFlavour, setSelectedFlavour] = useState<Flavour | null>(null)
   const [selectedFilling, setSelectedFilling] = useState<Flavour | null>(null)
   const [selectedFrosting, setSelectedFrosting] = useState<Flavour | null>(null)
@@ -46,15 +52,27 @@ export default function ProductPage() {
   const [notes, setNotes] = useState('')
   const [selectedAddons, setSelectedAddons] = useState<{ addon: Addon; qty: number }[]>([])
 
+  // Inspiration images (stored as base64 data URLs locally for cart)
+  const [inspirationImages, setInspirationImages] = useState<{ name: string; dataUrl: string }[]>([])
+  const fileInputRef = useRef<HTMLInputElement>(null)
+
   useEffect(() => {
-    const fetch = async () => {
+    const fetchData = async () => {
       const { data: bakerData } = await supabase
         .from('baker_profiles').select('*').eq('slug', slug).single()
       if (!bakerData) { router.push('/'); return }
 
+      // Fetch product WITHOUT sizes first
       const { data: productData } = await supabase
-        .from('products').select('*, sizes(*)').eq('id', productId).single()
+        .from('products').select('*').eq('id', productId).single()
       if (!productData) { router.push(`/${slug}`); return }
+
+      // Fetch sizes separately to avoid nested join issues
+      const { data: sizesData } = await supabase
+        .from('sizes')
+        .select('*')
+        .eq('product_id', productId)
+        .order('sort_order', { ascending: true })
 
       const [flavoursRes, addonsRes, fOverrides, aOverrides] = await Promise.all([
         supabase.from('flavours').select('*').eq('baker_id', bakerData.id).eq('is_active', true).order('name'),
@@ -68,11 +86,11 @@ export default function ProductPage() {
       const allFlavours = (flavoursRes.data || []).filter((f: Flavour) => !excludedFlavourIds.includes(f.id))
       const allAddons = (addonsRes.data || []).filter((a: Addon) => !excludedAddonIds.includes(a.id))
 
-      const sorted = (productData.sizes || []).sort((a: Size, b: Size) => a.sort_order - b.sort_order)
+      const sizes: Size[] = (sizesData || [])
 
       setProduct({
         ...productData,
-        sizes: sorted,
+        sizes,
         excluded_flavour_ids: excludedFlavourIds,
         excluded_addon_ids: excludedAddonIds,
         baker: bakerData,
@@ -83,10 +101,9 @@ export default function ProductPage() {
       // Pre-select required addons
       const required = allAddons.filter((a: Addon) => a.is_required)
       setSelectedAddons(required.map((a: Addon) => ({ addon: a, qty: 1 })))
-
       setLoading(false)
     }
-    fetch()
+    fetchData()
   }, [slug, productId])
 
   if (loading || !product) return (
@@ -100,6 +117,9 @@ export default function ProductPage() {
   const fillings = product.flavours.filter(f => f.type === 'filling')
   const frostings = product.flavours.filter(f => f.type === 'frosting')
   const isCustom = product.product_type === 'custom' || product.is_enquiry_only
+
+  // Show layer selector for cake types
+  const showLayers = ['celebration_cake', 'wedding_cake', 'character_cake', 'custom'].includes(product.product_type)
 
   // Price calculation
   const basePrice = selectedSize?.price || (product.sizes[0]?.price ?? 0)
@@ -129,6 +149,27 @@ export default function ProductPage() {
     ))
   }
 
+  const handleInspirationUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || [])
+    files.forEach(file => {
+      if (!file.type.startsWith('image/')) return
+      const reader = new FileReader()
+      reader.onload = (ev) => {
+        setInspirationImages(prev => [
+          ...prev,
+          { name: file.name, dataUrl: ev.target?.result as string }
+        ])
+      }
+      reader.readAsDataURL(file)
+    })
+    // Reset input so same file can be re-added
+    if (fileInputRef.current) fileInputRef.current.value = ''
+  }
+
+  const removeInspirationImage = (index: number) => {
+    setInspirationImages(prev => prev.filter((_, i) => i !== index))
+  }
+
   const handleAddToBasket = () => {
     const cart = JSON.parse(localStorage.getItem(`cart_${slug}`) || '[]')
     const item = {
@@ -139,6 +180,7 @@ export default function ProductPage() {
       is_enquiry_only: product.is_enquiry_only,
       size_id: selectedSize?.id || null,
       size_label: selectedSize?.label || '',
+      layer: selectedLayer || null,
       flavour_id: selectedFlavour?.id || null,
       flavour_name: selectedFlavour?.name || '',
       filling_id: selectedFilling?.id || null,
@@ -147,6 +189,7 @@ export default function ProductPage() {
       frosting_name: selectedFrosting?.name || '',
       enquiry_text: enquiryText,
       notes,
+      inspiration_images: inspirationImages.map(img => img.dataUrl),
       addons: selectedAddons.map(({ addon, qty }) => ({
         addon_id: addon.id, addon_name: addon.name, quantity: qty, price: addon.price,
       })),
@@ -222,17 +265,17 @@ export default function ProductPage() {
                   onChange={e => setEnquiryText(e.target.value)}
                   rows={4}
                   className="w-full px-4 py-3 rounded-xl border border-slate-200 text-sm focus:outline-none bg-slate-50 resize-none"
-                  style={{ '--tw-ring-color': accent } as any}
                 />
               </div>
             ) : (
               <>
-                {/* Size selection — pill grid */}
-                {product.sizes.length > 0 && (
+                {/* ── Size selection ── */}
+                {product.sizes.length > 0 ? (
                   <div>
                     <h3 className="text-sm font-bold text-slate-900 mb-3 flex items-center gap-2">
                       <span style={{ color: accent }}>◆</span>
                       {['cupcakes', 'bento'].includes(product.product_type) ? 'Quantity' : 'Select Size'}
+                      <span className="text-red-400">*</span>
                     </h3>
                     <div className="grid grid-cols-3 gap-2.5">
                       {product.sizes.map(size => {
@@ -260,9 +303,42 @@ export default function ProductPage() {
                       })}
                     </div>
                   </div>
+                ) : (
+                  // Fallback: show a small hint if no sizes loaded (helps debug)
+                  <div className="text-xs text-slate-400 italic px-1">
+                    No sizes configured for this product yet.
+                  </div>
                 )}
 
-                {/* Sponge flavour dropdown */}
+                {/* ── Layers / Style dropdown ── */}
+                {showLayers && (
+                  <div>
+                    <h3 className="text-sm font-bold text-slate-900 mb-2 flex items-center gap-2">
+                      <span style={{ color: accent }}>◆</span> Cake Style
+                    </h3>
+                    <div className="relative">
+                      <select
+                        value={selectedLayer}
+                        onChange={e => setSelectedLayer(e.target.value)}
+                        className="w-full h-12 px-4 rounded-xl border border-slate-200 bg-slate-50 text-slate-900 text-sm appearance-none focus:outline-none pr-10"
+                      >
+                        <option value="">Select style...</option>
+                        {LAYER_OPTIONS.map(opt => (
+                          <option key={opt.id} value={opt.id}>
+                            {opt.label} — {opt.description}
+                          </option>
+                        ))}
+                      </select>
+                      <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none">
+                        <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                        </svg>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* ── Sponge flavour ── */}
                 {sponges.length > 0 && (
                   <div>
                     <h3 className="text-sm font-bold text-slate-900 mb-2 flex items-center gap-2">
@@ -290,7 +366,7 @@ export default function ProductPage() {
                   </div>
                 )}
 
-                {/* Filling dropdown */}
+                {/* ── Filling ── */}
                 {fillings.length > 0 && (
                   <div>
                     <h3 className="text-sm font-bold text-slate-900 mb-2 flex items-center gap-2">
@@ -318,7 +394,7 @@ export default function ProductPage() {
                   </div>
                 )}
 
-                {/* Frosting dropdown */}
+                {/* ── Frosting ── */}
                 {frostings.length > 0 && (
                   <div>
                     <h3 className="text-sm font-bold text-slate-900 mb-2 flex items-center gap-2">
@@ -346,7 +422,7 @@ export default function ProductPage() {
                   </div>
                 )}
 
-                {/* Character/theme for character cakes */}
+                {/* Character/theme */}
                 {product.product_type === 'character_cake' && (
                   <div>
                     <h3 className="text-sm font-bold text-slate-900 mb-2 flex items-center gap-2">
@@ -360,7 +436,7 @@ export default function ProductPage() {
                   </div>
                 )}
 
-                {/* Add-ons */}
+                {/* ── Add-ons ── */}
                 {product.addons.length > 0 && (
                   <div>
                     <h3 className="text-sm font-bold text-slate-900 mb-3 flex items-center gap-2">
@@ -407,7 +483,62 @@ export default function ProductPage() {
                   </div>
                 )}
 
-                {/* Notes */}
+                {/* ── Inspiration Images ── */}
+                <div>
+                  <h3 className="text-sm font-bold text-slate-900 mb-1 flex items-center gap-2">
+                    <span style={{ color: accent }}>◆</span> Inspiration Images
+                    <span className="text-slate-400 font-normal text-xs">(optional)</span>
+                  </h3>
+                  <p className="text-xs text-slate-400 mb-3">
+                    Upload photos to help the baker understand your vision
+                  </p>
+
+                  {/* Upload area */}
+                  <button
+                    onClick={() => fileInputRef.current?.click()}
+                    className="w-full border-2 border-dashed border-slate-200 rounded-xl py-6 flex flex-col items-center gap-2 bg-slate-50 hover:bg-slate-100 transition-colors"
+                    style={{ '--hover-border': accent } as any}
+                  >
+                    <div className="w-10 h-10 rounded-full flex items-center justify-center"
+                      style={{ backgroundColor: `${accent}15` }}>
+                      <svg className="w-5 h-5" style={{ color: accent }} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                          d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                      </svg>
+                    </div>
+                    <span className="text-sm font-semibold" style={{ color: accent }}>Add photos</span>
+                    <span className="text-xs text-slate-400">JPG, PNG, WEBP up to 10MB each</span>
+                  </button>
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept="image/*"
+                    multiple
+                    className="hidden"
+                    onChange={handleInspirationUpload}
+                  />
+
+                  {/* Uploaded thumbnails */}
+                  {inspirationImages.length > 0 && (
+                    <div className="grid grid-cols-3 gap-2 mt-3">
+                      {inspirationImages.map((img, i) => (
+                        <div key={i} className="relative aspect-square rounded-xl overflow-hidden border border-slate-200 group">
+                          <img src={img.dataUrl} alt={img.name} className="w-full h-full object-cover" />
+                          <button
+                            onClick={() => removeInspirationImage(i)}
+                            className="absolute top-1 right-1 w-6 h-6 rounded-full bg-black/60 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+                          >
+                            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" />
+                            </svg>
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* ── Customisation Notes ── */}
                 <div>
                   <h3 className="text-sm font-bold text-slate-900 mb-2 flex items-center gap-2">
                     <span style={{ color: accent }}>◆</span> Customisation Notes
