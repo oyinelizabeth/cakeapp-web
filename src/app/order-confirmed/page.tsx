@@ -18,7 +18,7 @@ export default function OrderConfirmed() {
               ['1', 'The baker reviews your request', 'Usually within 24–48 hours'],
               ['2', "You'll receive a quote by email", 'With the final price and deposit details'],
               ['3', 'Pay your deposit to confirm', 'Your order is secured once the deposit is paid'],
-              ['4', 'Enjoy your order! 🎉', 'The baker will fulfil your order on the agreed date'],
+              ['4', 'Enjoy your order!', 'The baker will fulfil your order on the agreed date'],
             ].map(([num, title, sub]) => (
               <div key={num} className="flex gap-3">
                 <div className="w-6 h-6 rounded-full bg-gray-900 text-white text-xs font-bold flex items-center justify-center shrink-0 mt-0.5">
