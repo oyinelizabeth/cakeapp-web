@@ -8,7 +8,16 @@ const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
 )
 
-type Size = { id: string; label: string; price: number; servings?: number; sort_order: number }
+type Size = {
+  id: string
+  label: string
+  price: number
+  price_adjustment: number
+  servings?: number
+  height?: string
+  variant_group?: string
+  sort_order: number
+}
 type Flavour = { id: string; name: string; price_adjustment: number; type: string }
 type Addon = { id: string; name: string; price: number; is_required: boolean; allow_quantity: boolean }
 type Product = {
@@ -25,54 +34,52 @@ type Product = {
   addons: Addon[]
 }
 
-// Layer options — stored as an addon or a local selection depending on your schema.
-// If you have a `layers` column on products or sizes, adapt accordingly.
-const LAYER_OPTIONS = [
-  { id: 'standard', label: 'Standard', description: 'Regular height' },
-  { id: 'tall', label: 'Tall', description: 'Extra height tier' },
-]
-
 export default function ProductPage() {
   const params = useParams()
   const router = useRouter()
-  const slug = params.slug as string
-  const productId = params.productId as string
+
+  // Handle both string and string[] from useParams
+  const slug = Array.isArray(params.slug) ? params.slug[0] : params.slug as string
+  const productId = Array.isArray(params.productId) ? params.productId[0] : params.productId as string
 
   const [product, setProduct] = useState<Product | null>(null)
   const [loading, setLoading] = useState(true)
   const [added, setAdded] = useState(false)
+  const [debugInfo, setDebugInfo] = useState<string>('')
 
   // Selections
   const [selectedSize, setSelectedSize] = useState<Size | null>(null)
-  const [selectedLayer, setSelectedLayer] = useState<string>('')
+  const [selectedHeight, setSelectedHeight] = useState<string>('')
   const [selectedFlavour, setSelectedFlavour] = useState<Flavour | null>(null)
   const [selectedFilling, setSelectedFilling] = useState<Flavour | null>(null)
   const [selectedFrosting, setSelectedFrosting] = useState<Flavour | null>(null)
   const [enquiryText, setEnquiryText] = useState('')
   const [notes, setNotes] = useState('')
   const [selectedAddons, setSelectedAddons] = useState<{ addon: Addon; qty: number }[]>([])
-
-  // Inspiration images (stored as base64 data URLs locally for cart)
   const [inspirationImages, setInspirationImages] = useState<{ name: string; dataUrl: string }[]>([])
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
+    if (!productId || !slug) return
+
     const fetchData = async () => {
       const { data: bakerData } = await supabase
         .from('baker_profiles').select('*').eq('slug', slug).single()
       if (!bakerData) { router.push('/'); return }
 
-      // Fetch product WITHOUT sizes first
       const { data: productData } = await supabase
         .from('products').select('*').eq('id', productId).single()
       if (!productData) { router.push(`/${slug}`); return }
 
-      // Fetch sizes separately to avoid nested join issues
-      const { data: sizesData } = await supabase
+      // Fetch sizes with explicit product_id filter + debug logging
+      const { data: sizesData, error: sizesError } = await supabase
         .from('sizes')
         .select('*')
         .eq('product_id', productId)
         .order('sort_order', { ascending: true })
+
+      // Debug banner — remove once sizes are confirmed working
+      setDebugInfo(`productId: ${productId} | sizes found: ${sizesData?.length ?? 0} | error: ${sizesError?.message ?? 'none'}`)
 
       const [flavoursRes, addonsRes, fOverrides, aOverrides] = await Promise.all([
         supabase.from('flavours').select('*').eq('baker_id', bakerData.id).eq('is_active', true).order('name'),
@@ -86,11 +93,9 @@ export default function ProductPage() {
       const allFlavours = (flavoursRes.data || []).filter((f: Flavour) => !excludedFlavourIds.includes(f.id))
       const allAddons = (addonsRes.data || []).filter((a: Addon) => !excludedAddonIds.includes(a.id))
 
-      const sizes: Size[] = (sizesData || [])
-
       setProduct({
         ...productData,
-        sizes,
+        sizes: sizesData || [],
         excluded_flavour_ids: excludedFlavourIds,
         excluded_addon_ids: excludedAddonIds,
         baker: bakerData,
@@ -98,7 +103,6 @@ export default function ProductPage() {
         addons: allAddons,
       })
 
-      // Pre-select required addons
       const required = allAddons.filter((a: Addon) => a.is_required)
       setSelectedAddons(required.map((a: Addon) => ({ addon: a, qty: 1 })))
       setLoading(false)
@@ -118,11 +122,16 @@ export default function ProductPage() {
   const frostings = product.flavours.filter(f => f.type === 'frosting')
   const isCustom = product.product_type === 'custom' || product.is_enquiry_only
 
-  // Show layer selector for cake types
-  const showLayers = ['celebration_cake', 'wedding_cake', 'character_cake', 'custom'].includes(product.product_type)
+  // Derive unique height options from the sizes data (e.g. "standard", "tall")
+  const heightOptions = [...new Set(product.sizes.map(s => s.height).filter(Boolean))] as string[]
+  const showHeightDropdown = heightOptions.length > 1
 
-  // Price calculation
-  const basePrice = selectedSize?.price || (product.sizes[0]?.price ?? 0)
+  // If height dropdown shown, only display sizes matching the selected height
+  const filteredSizes = showHeightDropdown && selectedHeight
+    ? product.sizes.filter(s => s.height === selectedHeight)
+    : product.sizes
+
+  const basePrice = selectedSize?.price || 0
   const flavourExtra = selectedFlavour?.price_adjustment || 0
   const fillingExtra = selectedFilling?.price_adjustment || 0
   const frostingExtra = selectedFrosting?.price_adjustment || 0
@@ -155,14 +164,10 @@ export default function ProductPage() {
       if (!file.type.startsWith('image/')) return
       const reader = new FileReader()
       reader.onload = (ev) => {
-        setInspirationImages(prev => [
-          ...prev,
-          { name: file.name, dataUrl: ev.target?.result as string }
-        ])
+        setInspirationImages(prev => [...prev, { name: file.name, dataUrl: ev.target?.result as string }])
       }
       reader.readAsDataURL(file)
     })
-    // Reset input so same file can be re-added
     if (fileInputRef.current) fileInputRef.current.value = ''
   }
 
@@ -180,7 +185,7 @@ export default function ProductPage() {
       is_enquiry_only: product.is_enquiry_only,
       size_id: selectedSize?.id || null,
       size_label: selectedSize?.label || '',
-      layer: selectedLayer || null,
+      size_height: selectedSize?.height || selectedHeight || null,
       flavour_id: selectedFlavour?.id || null,
       flavour_name: selectedFlavour?.name || '',
       filling_id: selectedFilling?.id || null,
@@ -251,9 +256,14 @@ export default function ProductPage() {
             )}
           </div>
 
-          <div className="px-5 space-y-6 mt-4">
+          {/* ── Temporary debug banner — remove once sizes confirmed working ── */}
+          {debugInfo && (
+            <div className="mx-5 mt-3 px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-700 font-mono break-all">
+              🔍 {debugInfo}
+            </div>
+          )}
 
-            {/* Custom / enquiry */}
+          <div className="px-5 space-y-6 mt-4">
             {isCustom ? (
               <div>
                 <h3 className="text-sm font-bold text-slate-900 mb-2">
@@ -269,8 +279,36 @@ export default function ProductPage() {
               </div>
             ) : (
               <>
+                {/* ── Height / Style (Standard / Tall) — derived from sizes.height ── */}
+                {showHeightDropdown && (
+                  <div>
+                    <h3 className="text-sm font-bold text-slate-900 mb-2 flex items-center gap-2">
+                      <span style={{ color: accent }}>◆</span> Cake Style
+                    </h3>
+                    <div className="relative">
+                      <select
+                        value={selectedHeight}
+                        onChange={e => { setSelectedHeight(e.target.value); setSelectedSize(null) }}
+                        className="w-full h-12 px-4 rounded-xl border border-slate-200 bg-slate-50 text-slate-900 text-sm appearance-none focus:outline-none pr-10"
+                      >
+                        <option value="">Select style...</option>
+                        {heightOptions.map(h => (
+                          <option key={h} value={h}>
+                            {h.charAt(0).toUpperCase() + h.slice(1)}
+                          </option>
+                        ))}
+                      </select>
+                      <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none">
+                        <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                        </svg>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
                 {/* ── Size selection ── */}
-                {product.sizes.length > 0 ? (
+                {filteredSizes.length > 0 ? (
                   <div>
                     <h3 className="text-sm font-bold text-slate-900 mb-3 flex items-center gap-2">
                       <span style={{ color: accent }}>◆</span>
@@ -278,7 +316,7 @@ export default function ProductPage() {
                       <span className="text-red-400">*</span>
                     </h3>
                     <div className="grid grid-cols-3 gap-2.5">
-                      {product.sizes.map(size => {
+                      {filteredSizes.map(size => {
                         const isSelected = selectedSize?.id === size.id
                         return (
                           <button key={size.id}
@@ -304,37 +342,10 @@ export default function ProductPage() {
                     </div>
                   </div>
                 ) : (
-                  // Fallback: show a small hint if no sizes loaded (helps debug)
                   <div className="text-xs text-slate-400 italic px-1">
-                    No sizes configured for this product yet.
-                  </div>
-                )}
-
-                {/* ── Layers / Style dropdown ── */}
-                {showLayers && (
-                  <div>
-                    <h3 className="text-sm font-bold text-slate-900 mb-2 flex items-center gap-2">
-                      <span style={{ color: accent }}>◆</span> Cake Style
-                    </h3>
-                    <div className="relative">
-                      <select
-                        value={selectedLayer}
-                        onChange={e => setSelectedLayer(e.target.value)}
-                        className="w-full h-12 px-4 rounded-xl border border-slate-200 bg-slate-50 text-slate-900 text-sm appearance-none focus:outline-none pr-10"
-                      >
-                        <option value="">Select style...</option>
-                        {LAYER_OPTIONS.map(opt => (
-                          <option key={opt.id} value={opt.id}>
-                            {opt.label} — {opt.description}
-                          </option>
-                        ))}
-                      </select>
-                      <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none">
-                        <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                        </svg>
-                      </div>
-                    </div>
+                    {showHeightDropdown && !selectedHeight
+                      ? 'Select a style above to see available sizes'
+                      : 'No sizes configured for this product yet.'}
                   </div>
                 )}
 
@@ -489,15 +500,10 @@ export default function ProductPage() {
                     <span style={{ color: accent }}>◆</span> Inspiration Images
                     <span className="text-slate-400 font-normal text-xs">(optional)</span>
                   </h3>
-                  <p className="text-xs text-slate-400 mb-3">
-                    Upload photos to help the baker understand your vision
-                  </p>
-
-                  {/* Upload area */}
+                  <p className="text-xs text-slate-400 mb-3">Upload photos to help the baker understand your vision</p>
                   <button
                     onClick={() => fileInputRef.current?.click()}
                     className="w-full border-2 border-dashed border-slate-200 rounded-xl py-6 flex flex-col items-center gap-2 bg-slate-50 hover:bg-slate-100 transition-colors"
-                    style={{ '--hover-border': accent } as any}
                   >
                     <div className="w-10 h-10 rounded-full flex items-center justify-center"
                       style={{ backgroundColor: `${accent}15` }}>
@@ -507,27 +513,16 @@ export default function ProductPage() {
                       </svg>
                     </div>
                     <span className="text-sm font-semibold" style={{ color: accent }}>Add photos</span>
-                    <span className="text-xs text-slate-400">JPG, PNG, WEBP up to 10MB each</span>
+                    <span className="text-xs text-slate-400">JPG, PNG, WEBP</span>
                   </button>
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    accept="image/*"
-                    multiple
-                    className="hidden"
-                    onChange={handleInspirationUpload}
-                  />
-
-                  {/* Uploaded thumbnails */}
+                  <input ref={fileInputRef} type="file" accept="image/*" multiple className="hidden" onChange={handleInspirationUpload} />
                   {inspirationImages.length > 0 && (
                     <div className="grid grid-cols-3 gap-2 mt-3">
                       {inspirationImages.map((img, i) => (
                         <div key={i} className="relative aspect-square rounded-xl overflow-hidden border border-slate-200 group">
                           <img src={img.dataUrl} alt={img.name} className="w-full h-full object-cover" />
-                          <button
-                            onClick={() => removeInspirationImage(i)}
-                            className="absolute top-1 right-1 w-6 h-6 rounded-full bg-black/60 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
-                          >
+                          <button onClick={() => removeInspirationImage(i)}
+                            className="absolute top-1 right-1 w-6 h-6 rounded-full bg-black/60 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
                             <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" />
                             </svg>
@@ -538,7 +533,7 @@ export default function ProductPage() {
                   )}
                 </div>
 
-                {/* ── Customisation Notes ── */}
+                {/* ── Notes ── */}
                 <div>
                   <h3 className="text-sm font-bold text-slate-900 mb-2 flex items-center gap-2">
                     <span style={{ color: accent }}>◆</span> Customisation Notes
@@ -556,7 +551,7 @@ export default function ProductPage() {
           </div>
         </div>
 
-        {/* Sticky footer CTA */}
+        {/* Sticky footer */}
         <footer className="fixed bottom-0 left-0 right-0 max-w-md mx-auto bg-white border-t border-slate-100 px-5 py-4 pb-6">
           <div className="flex items-center gap-4">
             <div className="flex-1">
