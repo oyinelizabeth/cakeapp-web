@@ -86,21 +86,8 @@ export default async function BakerPage({ params }: Props) {
 
       {/* Sticky nav */}
       <header className="sticky top-0 z-50 bg-white/90 backdrop-blur-md border-b border-gray-100">
-        <div className="max-w-4xl mx-auto px-4 h-14 flex items-center justify-between">
-          <div className="flex items-center gap-2.5">
-            {baker.logo_url ? (
-              <img src={baker.logo_url} alt={baker.business_name} className="w-7 h-7 rounded-lg object-cover" />
-            ) : (
-              <div className="w-7 h-7 rounded-lg flex items-center justify-center text-white text-xs font-bold"
-                style={{ backgroundColor: accent }}>
-                {baker.business_name?.charAt(0).toUpperCase()}
-              </div>
-            )}
-            <span className="text-sm font-bold tracking-tight">{baker.business_name}</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <BasketButton slug={slug} accent={accent} />
-          </div>
+        <div className="max-w-4xl mx-auto px-4 h-14 flex items-center justify-end">
+          <BasketButton slug={slug} accent={accent} />
         </div>
       </header>
 
@@ -131,14 +118,6 @@ export default async function BakerPage({ params }: Props) {
                   </div>
                 )}
               </div>
-              {/* Verified dot */}
-              {baker.instagram && (
-                <div className="absolute -bottom-1 -right-1 w-6 h-6 bg-green-500 rounded-full flex items-center justify-center shadow-md border-2 border-[#f5f4f2]">
-                  <svg className="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
-                  </svg>
-                </div>
-              )}
             </div>
 
             {/* Action buttons top-right */}
@@ -182,13 +161,19 @@ export default async function BakerPage({ params }: Props) {
             </span>
           )}
           {baker.pickup_available && (
-            <span className="text-xs font-semibold px-3 py-1.5 rounded-full bg-white border border-gray-200 text-slate-600">
-              🛍 Pickup
+            <span className="inline-flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-full bg-white border border-gray-200 text-slate-600">
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 11V7a4 4 0 00-8 0v4M5 9h14l1 12H4L5 9z" />
+              </svg>
+              Pickup
             </span>
           )}
           {baker.delivery_available && (
-            <span className="text-xs font-semibold px-3 py-1.5 rounded-full bg-white border border-gray-200 text-slate-600">
-              🚗 Delivery {baker.delivery_radius ? `(${baker.delivery_radius}mi)` : ''}
+            <span className="inline-flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-full bg-white border border-gray-200 text-slate-600">
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 17a2 2 0 11-4 0 2 2 0 014 0zM19 17a2 2 0 11-4 0 2 2 0 014 0z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16V6a1 1 0 00-1-1H4a1 1 0 00-1 1v10a1 1 0 001 1h1m8-1a1 1 0 01-1 1H9m4-1V8a1 1 0 011-1h2.586a1 1 0 01.707.293l3.414 3.414a1 1 0 01.293.707V16a1 1 0 01-1 1h-1m-6-1a1 1 0 001 1h1M5 17a2 2 0 104 0m-4 0a2 2 0 114 0m6 0a2 2 0 104 0m-4 0a2 2 0 114 0" />
+              </svg>
+              Delivery{baker.delivery_radius ? ` (${baker.delivery_radius}mi)` : ''}
             </span>
           )}
           {baker.lead_time_days && (
@@ -319,7 +304,13 @@ export default async function BakerPage({ params }: Props) {
         {/* ── SPECIAL REQUEST CTA ── */}
         <section className="mb-10 rounded-2xl p-8 text-center"
           style={{ backgroundColor: `${accent}08`, border: `1px solid ${accent}20` }}>
-          <p className="text-xl mb-1">✨</p>
+          <div className="flex justify-center mb-3">
+            <div className="w-10 h-10 rounded-xl flex items-center justify-center" style={{ backgroundColor: `${accent}15` }}>
+              <svg className="w-5 h-5" style={{ color: accent }} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+              </svg>
+            </div>
+          </div>
           <h2 className="text-lg font-bold mb-2">Something unique in mind?</h2>
           <p className="text-slate-500 text-sm mb-5 max-w-sm mx-auto leading-relaxed">
             Can't find what you're looking for? Send an enquiry and we'll create something just for you.
