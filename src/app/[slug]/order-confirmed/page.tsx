@@ -4,7 +4,11 @@ export default function OrderConfirmed() {
   return (
     <main className="min-h-screen bg-white flex items-center justify-center px-4">
       <div className="max-w-md w-full text-center">
-        <div className="text-6xl mb-6">🎂</div>
+        <div className="w-16 h-16 rounded-full bg-gray-900 flex items-center justify-center mx-auto mb-6">
+          <svg className="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" />
+          </svg>
+        </div>
         <h1 className="text-3xl font-extrabold text-gray-900 mb-3 tracking-tight">
           Request Submitted!
         </h1>
