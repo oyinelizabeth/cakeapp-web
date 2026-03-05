@@ -12,17 +12,20 @@ type Size = {
   id: string
   label: string
   price: number
-  price_adjustment: number
+  price_adjustment: number // tall upcharge
   servings?: number
-  height?: string
-  variant_group?: string
   sort_order: number
 }
 type Flavour = { id: string; name: string; price_adjustment: number; type: string }
 type Addon = { id: string; name: string; price: number; is_required: boolean; allow_quantity: boolean }
 type Product = {
-  id: string; name: string; description: string
-  product_type: string; is_enquiry_only: boolean; image_url?: string
+  id: string
+  name: string
+  description: string
+  product_type: string
+  is_enquiry_only: boolean
+  has_tall: boolean
+  image_url?: string
   sizes: Size[]
   excluded_flavour_ids: string[]
   excluded_addon_ids: string[]
@@ -37,19 +40,16 @@ type Product = {
 export default function ProductPage() {
   const params = useParams()
   const router = useRouter()
-
-  // Handle both string and string[] from useParams
   const slug = Array.isArray(params.slug) ? params.slug[0] : params.slug as string
   const productId = Array.isArray(params.productId) ? params.productId[0] : params.productId as string
 
   const [product, setProduct] = useState<Product | null>(null)
   const [loading, setLoading] = useState(true)
   const [added, setAdded] = useState(false)
-  const [debugInfo, setDebugInfo] = useState<string>('')
 
   // Selections
   const [selectedSize, setSelectedSize] = useState<Size | null>(null)
-  const [selectedHeight, setSelectedHeight] = useState<string>('')
+  const [isTall, setIsTall] = useState(false)
   const [selectedFlavour, setSelectedFlavour] = useState<Flavour | null>(null)
   const [selectedFilling, setSelectedFilling] = useState<Flavour | null>(null)
   const [selectedFrosting, setSelectedFrosting] = useState<Flavour | null>(null)
@@ -61,7 +61,6 @@ export default function ProductPage() {
 
   useEffect(() => {
     if (!productId || !slug) return
-
     const fetchData = async () => {
       const { data: bakerData } = await supabase
         .from('baker_profiles').select('*').eq('slug', slug).single()
@@ -71,15 +70,8 @@ export default function ProductPage() {
         .from('products').select('*').eq('id', productId).single()
       if (!productData) { router.push(`/${slug}`); return }
 
-      // Fetch sizes with explicit product_id filter + debug logging
-      const { data: sizesData, error: sizesError } = await supabase
-        .from('sizes')
-        .select('*')
-        .eq('product_id', productId)
-        .order('sort_order', { ascending: true })
-
-      // Debug banner — remove once sizes are confirmed working
-      setDebugInfo(`productId: ${productId} | sizes found: ${sizesData?.length ?? 0} | error: ${sizesError?.message ?? 'none'}`)
+      const { data: sizesData } = await supabase
+        .from('sizes').select('*').eq('product_id', productId).order('sort_order', { ascending: true })
 
       const [flavoursRes, addonsRes, fOverrides, aOverrides] = await Promise.all([
         supabase.from('flavours').select('*').eq('baker_id', bakerData.id).eq('is_active', true).order('name'),
@@ -95,6 +87,7 @@ export default function ProductPage() {
 
       setProduct({
         ...productData,
+        has_tall: productData.has_tall || false,
         sizes: sizesData || [],
         excluded_flavour_ids: excludedFlavourIds,
         excluded_addon_ids: excludedAddonIds,
@@ -122,21 +115,14 @@ export default function ProductPage() {
   const frostings = product.flavours.filter(f => f.type === 'frosting')
   const isCustom = product.product_type === 'custom' || product.is_enquiry_only
 
-  // Derive unique height options from the sizes data (e.g. "standard", "tall")
-  const heightOptions = [...new Set(product.sizes.map(s => s.height).filter(Boolean))] as string[]
-  const showHeightDropdown = heightOptions.length > 1
-
-  // If height dropdown shown, only display sizes matching the selected height
-  const filteredSizes = showHeightDropdown && selectedHeight
-    ? product.sizes.filter(s => s.height === selectedHeight)
-    : product.sizes
-
+  // Price calculation — tall adds price_adjustment of selected size
   const basePrice = selectedSize?.price || 0
+  const tallUpcharge = isTall ? (selectedSize?.price_adjustment || 0) : 0
   const flavourExtra = selectedFlavour?.price_adjustment || 0
   const fillingExtra = selectedFilling?.price_adjustment || 0
   const frostingExtra = selectedFrosting?.price_adjustment || 0
   const addonsExtra = selectedAddons.reduce((sum, { addon, qty }) => sum + addon.price * qty, 0)
-  const totalPrice = basePrice + flavourExtra + fillingExtra + frostingExtra + addonsExtra
+  const totalPrice = basePrice + tallUpcharge + flavourExtra + fillingExtra + frostingExtra + addonsExtra
 
   const isValid = isCustom
     ? enquiryText.trim().length > 0
@@ -185,7 +171,8 @@ export default function ProductPage() {
       is_enquiry_only: product.is_enquiry_only,
       size_id: selectedSize?.id || null,
       size_label: selectedSize?.label || '',
-      size_height: selectedSize?.height || selectedHeight || null,
+      is_tall: isTall,
+      tall_upcharge: tallUpcharge,
       flavour_id: selectedFlavour?.id || null,
       flavour_name: selectedFlavour?.name || '',
       filling_id: selectedFilling?.id || null,
@@ -206,6 +193,14 @@ export default function ProductPage() {
     setAdded(true)
     setTimeout(() => router.push(`/${slug}`), 1200)
   }
+
+  const SelectArrow = () => (
+    <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none">
+      <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+      </svg>
+    </div>
+  )
 
   return (
     <div className="min-h-screen bg-[#f8f6f6] font-sans">
@@ -272,36 +267,45 @@ export default function ProductPage() {
               </div>
             ) : (
               <>
-                {/* ── Height / Style (Standard / Tall) — derived from sizes.height ── */}
-                {showHeightDropdown && (
+                {/* ── Standard / Tall ── only shown if baker enabled has_tall */}
+                {product.has_tall && (
                   <div>
                     <h3 className="text-sm font-bold text-slate-900 mb-2 flex items-center gap-2">
                       <span style={{ color: accent }}>◆</span> Cake Style
                     </h3>
-                    <div className="relative">
-                      <select
-                        value={selectedHeight}
-                        onChange={e => { setSelectedHeight(e.target.value); setSelectedSize(null) }}
-                        className="w-full h-12 px-4 rounded-xl border border-slate-200 bg-slate-50 text-slate-900 text-sm appearance-none focus:outline-none pr-10"
-                      >
-                        <option value="">Select style...</option>
-                        {heightOptions.map(h => (
-                          <option key={h} value={h}>
-                            {h.charAt(0).toUpperCase() + h.slice(1)}
-                          </option>
-                        ))}
-                      </select>
-                      <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none">
-                        <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                        </svg>
-                      </div>
+                    <div className="grid grid-cols-2 gap-2.5">
+                      {[
+                        { value: false, label: 'Standard', sub: 'Regular height' },
+                        { value: true, label: 'Tall', sub: selectedSize ? `+£${selectedSize.price_adjustment || '?'}` : 'Extra height' },
+                      ].map(opt => {
+                        const isSelected = isTall === opt.value
+                        return (
+                          <button
+                            key={String(opt.value)}
+                            onClick={() => setIsTall(opt.value)}
+                            className="flex flex-col items-center justify-center p-3 rounded-xl border-2 transition-all"
+                            style={isSelected
+                              ? { borderColor: accent, backgroundColor: `${accent}10` }
+                              : { borderColor: '#e5e7eb', backgroundColor: '#f9fafb' }}
+                          >
+                            <span className="text-sm font-bold" style={isSelected ? { color: accent } : { color: '#111' }}>
+                              {opt.label}
+                            </span>
+                            <span className="text-[11px] mt-0.5" style={isSelected ? { color: `${accent}99` } : { color: '#9ca3af' }}>
+                              {opt.sub}
+                            </span>
+                          </button>
+                        )
+                      })}
                     </div>
+                    {isTall && !selectedSize && (
+                      <p className="text-xs text-slate-400 mt-2">Select a size to see the tall upcharge</p>
+                    )}
                   </div>
                 )}
 
                 {/* ── Size selection ── */}
-                {filteredSizes.length > 0 ? (
+                {product.sizes.length > 0 ? (
                   <div>
                     <h3 className="text-sm font-bold text-slate-900 mb-3 flex items-center gap-2">
                       <span style={{ color: accent }}>◆</span>
@@ -309,8 +313,13 @@ export default function ProductPage() {
                       <span className="text-red-400">*</span>
                     </h3>
                     <div className="grid grid-cols-3 gap-2.5">
-                      {filteredSizes.map(size => {
+                      {product.sizes.map(size => {
                         const isSelected = selectedSize?.id === size.id
+                        // Show tall price if tall is selected and size has an upcharge
+                        const displayPrice = isTall && size.price_adjustment > 0
+                          ? size.price + size.price_adjustment
+                          : size.price
+                        const hasTallUpcharge = product.has_tall && size.price_adjustment > 0
                         return (
                           <button key={size.id}
                             onClick={() => setSelectedSize(isSelected ? null : size)}
@@ -327,19 +336,20 @@ export default function ProductPage() {
                               </span>
                             )}
                             <span className="text-[11px] font-semibold mt-1" style={isSelected ? { color: accent } : { color: '#6b7280' }}>
-                              £{size.price}
+                              £{displayPrice}
                             </span>
+                            {hasTallUpcharge && !isTall && (
+                              <span className="text-[9px] mt-0.5" style={{ color: '#9ca3af' }}>
+                                Tall: £{size.price + size.price_adjustment}
+                              </span>
+                            )}
                           </button>
                         )
                       })}
                     </div>
                   </div>
                 ) : (
-                  <div className="text-xs text-slate-400 italic px-1">
-                    {showHeightDropdown && !selectedHeight
-                      ? 'Select a style above to see available sizes'
-                      : 'No sizes configured for this product yet.'}
-                  </div>
+                  <div className="text-xs text-slate-400 italic px-1">No sizes configured for this product yet.</div>
                 )}
 
                 {/* ── Sponge flavour ── */}
@@ -349,11 +359,9 @@ export default function ProductPage() {
                       <span style={{ color: accent }}>◆</span> Sponge Flavour
                     </h3>
                     <div className="relative">
-                      <select
-                        value={selectedFlavour?.id || ''}
+                      <select value={selectedFlavour?.id || ''}
                         onChange={e => setSelectedFlavour(sponges.find(f => f.id === e.target.value) || null)}
-                        className="w-full h-12 px-4 rounded-xl border border-slate-200 bg-slate-50 text-slate-900 text-sm appearance-none focus:outline-none pr-10"
-                      >
+                        className="w-full h-12 px-4 rounded-xl border border-slate-200 bg-slate-50 text-slate-900 text-sm appearance-none focus:outline-none pr-10">
                         <option value="">Select flavour...</option>
                         {sponges.map(f => (
                           <option key={f.id} value={f.id}>
@@ -361,11 +369,7 @@ export default function ProductPage() {
                           </option>
                         ))}
                       </select>
-                      <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none">
-                        <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                        </svg>
-                      </div>
+                      <SelectArrow />
                     </div>
                   </div>
                 )}
@@ -377,11 +381,9 @@ export default function ProductPage() {
                       <span style={{ color: accent }}>◆</span> Filling
                     </h3>
                     <div className="relative">
-                      <select
-                        value={selectedFilling?.id || ''}
+                      <select value={selectedFilling?.id || ''}
                         onChange={e => setSelectedFilling(fillings.find(f => f.id === e.target.value) || null)}
-                        className="w-full h-12 px-4 rounded-xl border border-slate-200 bg-slate-50 text-slate-900 text-sm appearance-none focus:outline-none pr-10"
-                      >
+                        className="w-full h-12 px-4 rounded-xl border border-slate-200 bg-slate-50 text-slate-900 text-sm appearance-none focus:outline-none pr-10">
                         <option value="">Select filling...</option>
                         {fillings.map(f => (
                           <option key={f.id} value={f.id}>
@@ -389,11 +391,7 @@ export default function ProductPage() {
                           </option>
                         ))}
                       </select>
-                      <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none">
-                        <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                        </svg>
-                      </div>
+                      <SelectArrow />
                     </div>
                   </div>
                 )}
@@ -405,11 +403,9 @@ export default function ProductPage() {
                       <span style={{ color: accent }}>◆</span> Frosting
                     </h3>
                     <div className="relative">
-                      <select
-                        value={selectedFrosting?.id || ''}
+                      <select value={selectedFrosting?.id || ''}
                         onChange={e => setSelectedFrosting(frostings.find(f => f.id === e.target.value) || null)}
-                        className="w-full h-12 px-4 rounded-xl border border-slate-200 bg-slate-50 text-slate-900 text-sm appearance-none focus:outline-none pr-10"
-                      >
+                        className="w-full h-12 px-4 rounded-xl border border-slate-200 bg-slate-50 text-slate-900 text-sm appearance-none focus:outline-none pr-10">
                         <option value="">Select frosting...</option>
                         {frostings.map(f => (
                           <option key={f.id} value={f.id}>
@@ -417,11 +413,7 @@ export default function ProductPage() {
                           </option>
                         ))}
                       </select>
-                      <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none">
-                        <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                        </svg>
-                      </div>
+                      <SelectArrow />
                     </div>
                   </div>
                 )}
