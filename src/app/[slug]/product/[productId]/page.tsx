@@ -191,7 +191,7 @@ export default function ProductPage() {
     localStorage.setItem(`cart_${slug}`, JSON.stringify(cart))
     window.dispatchEvent(new Event('cart_updated'))
     setAdded(true)
-    setTimeout(() => router.push(`/${slug}`), 1200)
+    setTimeout(() => router.push(`/${slug}/basket`), 800)
   }
 
   const SelectArrow = () => (

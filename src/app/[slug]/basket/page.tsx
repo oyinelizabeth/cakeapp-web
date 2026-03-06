@@ -22,6 +22,7 @@ type CartItem = {
   frosting_name: string
   enquiry_text: string
   notes: string
+  inspiration_images: string[]
   addons: { addon_id: string; addon_name: string; quantity: number; price: number }[]
   price: number
 }
@@ -133,6 +134,34 @@ export default function BasketPage() {
 
         const itemNotes = [item.notes, item.enquiry_text].filter(Boolean).join(' — ')
 
+        // Upload per-item inspiration images from base64 to Supabase storage
+        const uploadedImageUrls: string[] = []
+        for (const base64DataUrl of (item.inspiration_images || [])) {
+          try {
+            // Convert base64 data URL to Uint8Array without fetch()
+            const [meta, base64] = base64DataUrl.split(',')
+            const mimeMatch = meta.match(/:(.*?);/)
+            const mime = mimeMatch ? mimeMatch[1] : 'image/jpeg'
+            const ext = mime.split('/')[1] || 'jpg'
+            const binary = atob(base64)
+            const bytes = new Uint8Array(binary.length)
+            for (let i = 0; i < binary.length; i++) {
+              bytes[i] = binary.charCodeAt(i)
+            }
+            const filename = `item-inspo-${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`
+            const { data: uploadData, error: uploadError } = await supabase.storage
+              .from('order-inspo').upload(filename, bytes, { contentType: mime, upsert: true })
+            if (uploadError) {
+              console.error('Upload error:', uploadError)
+            } else if (uploadData) {
+              const { data: { publicUrl } } = supabase.storage.from('order-inspo').getPublicUrl(filename)
+              uploadedImageUrls.push(publicUrl)
+            }
+          } catch (e) {
+            console.error('Failed to upload item inspiration image', e)
+          }
+        }
+
         const { data: orderItem } = await supabase.from('order_items').insert({
           order_id: order.id,
           product_id: item.product_id,
@@ -141,6 +170,7 @@ export default function BasketPage() {
           size: item.size_label,
           flavour: flavourParts,
           notes: itemNotes,
+          inspiration_image_urls: uploadedImageUrls.length > 0 ? uploadedImageUrls : null,
         }).select().single()
 
         if (orderItem && item.addons.length > 0) {
@@ -172,6 +202,60 @@ export default function BasketPage() {
     </div>
   )
 
+  // ── Shared inspiration image grid ──
+  const InspirationGrid = ({ images }: { images: string[] }) => {
+    if (!images?.length) return null
+    return (
+      <div className="grid grid-cols-4 gap-1.5 mt-2">
+        {images.map((src, i) => (
+          <div key={i} className="aspect-square rounded-lg overflow-hidden border border-gray-100">
+            <img src={src} alt="Inspiration" className="w-full h-full object-cover" />
+          </div>
+        ))}
+      </div>
+    )
+  }
+
+  // ── Shared cart item summary ──
+  const CartItemSummary = ({ item, variant }: { item: CartItem; variant: 'basket' | 'review' }) => (
+    <div className={variant === 'basket'
+      ? 'bg-white border border-gray-100 rounded-2xl p-4 shadow-sm'
+      : 'mb-3 p-4 rounded-xl border border-gray-100 bg-gray-50'
+    }>
+      <div className="flex items-start justify-between mb-2">
+        <p className="font-bold text-slate-900 text-sm">{item.product_name}</p>
+        {variant === 'basket' && (
+          <button onClick={() => removeItem(item.id)}
+            className="w-7 h-7 rounded-full bg-red-50 flex items-center justify-center ml-2 shrink-0">
+            <svg className="w-3.5 h-3.5 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        )}
+      </div>
+
+      <div className="space-y-0.5">
+        {item.size_label && <p className="text-xs text-slate-500">Size: {item.size_label}</p>}
+        {item.flavour_name && <p className="text-xs text-slate-500">Sponge: {item.flavour_name}</p>}
+        {item.filling_name && <p className="text-xs text-slate-500">Filling: {item.filling_name}</p>}
+        {item.frosting_name && <p className="text-xs text-slate-500">Frosting: {item.frosting_name}</p>}
+        {item.enquiry_text && <p className="text-xs text-slate-500 italic">"{item.enquiry_text}"</p>}
+        {item.addons?.map(a => (
+          <p key={a.addon_id} className="text-xs text-slate-400">
+            + {a.quantity > 1 ? `${a.quantity}x ` : ''}{a.addon_name}
+          </p>
+        ))}
+        {item.notes && <p className="text-xs text-slate-400 italic mt-1">Note: "{item.notes}"</p>}
+      </div>
+
+      <InspirationGrid images={item.inspiration_images} />
+
+      {item.price > 0 && (
+        <p className="text-sm font-bold mt-2.5" style={{ color: accent }}>£{item.price.toFixed(0)}</p>
+      )}
+    </div>
+  )
+
   return (
     <div className="min-h-screen bg-[#f8f6f6] font-sans">
       <div className="max-w-md mx-auto bg-white min-h-screen shadow-xl flex flex-col">
@@ -198,7 +282,7 @@ export default function BasketPage() {
 
         <div className="flex-1 overflow-y-auto pb-28 px-5 py-5">
 
-          {/* STEP 0: Basket */}
+          {/* ── STEP 0: Basket ── */}
           {step === 0 && (
             <div>
               {cart.length === 0 ? (
@@ -210,7 +294,7 @@ export default function BasketPage() {
                   </div>
                   <p className="font-bold text-slate-900 mb-1">Your basket is empty</p>
                   <p className="text-sm text-slate-400 mb-6">Head back to browse products</p>
-                  <Link href={`/${slug}`}
+                  <Link href={`/${slug}/menu`}
                     className="inline-block text-white px-6 py-3 rounded-xl font-bold text-sm"
                     style={{ backgroundColor: accent }}>
                     Browse Products
@@ -219,36 +303,10 @@ export default function BasketPage() {
               ) : (
                 <div className="space-y-3">
                   {cart.map(item => (
-                    <div key={item.id} className="bg-white border border-gray-100 rounded-2xl p-4 shadow-sm">
-                      <div className="flex items-start justify-between mb-2">
-                        <p className="font-bold text-slate-900">{item.product_name}</p>
-                        <button onClick={() => removeItem(item.id)}
-                          className="w-7 h-7 rounded-full bg-red-50 flex items-center justify-center ml-2 shrink-0">
-                          <svg className="w-3.5 h-3.5 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" />
-                          </svg>
-                        </button>
-                      </div>
-                      <div className="space-y-0.5">
-                        {item.size_label && <p className="text-xs text-slate-500">Size: {item.size_label}</p>}
-                        {item.flavour_name && <p className="text-xs text-slate-500">Sponge: {item.flavour_name}</p>}
-                        {item.filling_name && <p className="text-xs text-slate-500">Filling: {item.filling_name}</p>}
-                        {item.frosting_name && <p className="text-xs text-slate-500">Frosting: {item.frosting_name}</p>}
-                        {item.enquiry_text && <p className="text-xs text-slate-500 italic">"{item.enquiry_text}"</p>}
-                        {item.addons.map(a => (
-                          <p key={a.addon_id} className="text-xs text-slate-400">
-                            + {a.quantity > 1 ? `${a.quantity}x ` : ''}{a.addon_name}
-                          </p>
-                        ))}
-                        {item.notes && <p className="text-xs text-slate-400 italic mt-1">Note: "{item.notes}"</p>}
-                      </div>
-                      {item.price > 0 && (
-                        <p className="text-sm font-bold mt-2" style={{ color: accent }}>£{item.price.toFixed(0)}</p>
-                      )}
-                    </div>
+                    <CartItemSummary key={item.id} item={item} variant="basket" />
                   ))}
 
-                  <Link href={`/${slug}`}
+                  <Link href={`/${slug}/menu`}
                     className="flex items-center justify-center gap-2 w-full py-3 rounded-xl border-2 border-dashed border-gray-200 text-sm font-semibold text-slate-400 hover:border-gray-300 transition-colors">
                     + Add another product
                   </Link>
@@ -264,25 +322,28 @@ export default function BasketPage() {
             </div>
           )}
 
-          {/* STEP 1: Details */}
+          {/* ── STEP 1: Details ── */}
           {step === 1 && (
             <div className="space-y-5">
               <div>
                 <h2 className="text-xl font-extrabold text-slate-900 mb-1">Your details</h2>
                 <p className="text-slate-400 text-sm">Tell us about yourself and your event.</p>
               </div>
+
               <div>
                 <label className="text-xs font-bold text-slate-400 uppercase tracking-wide">Your Name *</label>
                 <input type="text" placeholder="Jane Smith" value={customerName}
                   onChange={e => setCustomerName(e.target.value)}
                   className="w-full mt-2 px-4 py-3 rounded-xl border border-gray-200 text-sm focus:outline-none bg-slate-50" />
               </div>
+
               <div>
                 <label className="text-xs font-bold text-slate-400 uppercase tracking-wide">Email Address *</label>
                 <input type="email" placeholder="jane@example.com" value={customerEmail}
                   onChange={e => setCustomerEmail(e.target.value)}
                   className="w-full mt-2 px-4 py-3 rounded-xl border border-gray-200 text-sm focus:outline-none bg-slate-50" />
               </div>
+
               <div>
                 <label className="text-xs font-bold text-slate-400 uppercase tracking-wide">Event Date *</label>
                 <input type="date" value={eventDate} min={minDate()}
@@ -292,6 +353,7 @@ export default function BasketPage() {
                   <p className="text-xs text-slate-400 mt-1">{baker.lead_time_days} days notice required</p>
                 )}
               </div>
+
               {(baker?.pickup_available || baker?.delivery_available) && (
                 <div>
                   <label className="text-xs font-bold text-slate-400 uppercase tracking-wide">Collection *</label>
@@ -299,20 +361,25 @@ export default function BasketPage() {
                     {baker?.pickup_available && (
                       <button onClick={() => setCollectionType('pickup')}
                         className="flex-1 py-3 rounded-xl border-2 font-semibold text-sm transition-all"
-                        style={collectionType === 'pickup' ? { backgroundColor: accent, borderColor: accent, color: '#fff' } : { borderColor: '#e5e7eb', color: '#374151' }}>
+                        style={collectionType === 'pickup'
+                          ? { backgroundColor: accent, borderColor: accent, color: '#fff' }
+                          : { borderColor: '#e5e7eb', color: '#374151' }}>
                         Pickup
                       </button>
                     )}
                     {baker?.delivery_available && (
                       <button onClick={() => setCollectionType('delivery')}
                         className="flex-1 py-3 rounded-xl border-2 font-semibold text-sm transition-all"
-                        style={collectionType === 'delivery' ? { backgroundColor: accent, borderColor: accent, color: '#fff' } : { borderColor: '#e5e7eb', color: '#374151' }}>
+                        style={collectionType === 'delivery'
+                          ? { backgroundColor: accent, borderColor: accent, color: '#fff' }
+                          : { borderColor: '#e5e7eb', color: '#374151' }}>
                         Delivery
                       </button>
                     )}
                   </div>
                 </div>
               )}
+
               <div>
                 <label className="text-xs font-bold text-slate-400 uppercase tracking-wide">Budget (optional)</label>
                 <div className="relative mt-2">
@@ -321,12 +388,14 @@ export default function BasketPage() {
                     className="w-full pl-8 pr-4 py-3 rounded-xl border border-gray-200 text-sm focus:outline-none bg-slate-50" />
                 </div>
               </div>
+
               <div>
                 <label className="text-xs font-bold text-slate-400 uppercase tracking-wide">Dietary Requirements</label>
                 <input type="text" placeholder="e.g. Vegan, Gluten free" value={dietary}
                   onChange={e => setDietary(e.target.value)}
                   className="w-full mt-2 px-4 py-3 rounded-xl border border-gray-200 text-sm focus:outline-none bg-slate-50" />
               </div>
+
               <div>
                 <label className="text-xs font-bold text-slate-400 uppercase tracking-wide">Allergens</label>
                 <input type="text" placeholder="e.g. Nut allergy, Dairy free" value={allergens}
@@ -334,27 +403,32 @@ export default function BasketPage() {
                   className="w-full mt-2 px-4 py-3 rounded-xl border border-gray-200 text-sm focus:outline-none bg-slate-50" />
                 <p className="text-xs text-orange-500 mt-1 font-medium">Please list all allergens — this is important for your safety</p>
               </div>
+
               <div>
-                <label className="text-xs font-bold text-slate-400 uppercase tracking-wide">Inspiration Image (optional)</label>
-                <label className="flex flex-col items-center justify-center w-full h-32 border-2 border-dashed border-gray-200 rounded-xl cursor-pointer hover:border-gray-300 transition-all overflow-hidden mt-2">
+                <label className="text-xs font-bold text-slate-400 uppercase tracking-wide">Overall Inspiration Image (optional)</label>
+                <p className="text-xs text-slate-400 mt-1 mb-2">Any extra inspiration for the whole order</p>
+                <label className="flex flex-col items-center justify-center w-full h-32 border-2 border-dashed border-gray-200 rounded-xl cursor-pointer hover:border-gray-300 transition-all overflow-hidden mt-1">
                   {inspoPreview ? (
                     <div className="relative w-full h-full">
                       <img src={inspoPreview} alt="Inspiration" className="w-full h-full object-cover" />
                       <button type="button"
                         onClick={e => { e.preventDefault(); setInspoImage(null); setInspoPreview(null) }}
-                        className="absolute top-2 right-2 bg-white rounded-full w-6 h-6 flex items-center justify-center shadow text-slate-500 text-xs font-bold">✕</button>
+                        className="absolute top-2 right-2 bg-white rounded-full w-6 h-6 flex items-center justify-center shadow text-slate-500 text-xs font-bold">
+                        ✕
+                      </button>
                     </div>
                   ) : (
                     <div className="flex flex-col items-center gap-1.5 text-slate-400">
                       <svg className="w-7 h-7" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
                       </svg>
-                      <span className="text-xs font-medium">Tap to upload inspiration photo</span>
+                      <span className="text-xs font-medium">Tap to upload</span>
                     </div>
                   )}
                   <input type="file" accept="image/*" className="hidden" onChange={handleImageChange} />
                 </label>
               </div>
+
               <div>
                 <label className="text-xs font-bold text-slate-400 uppercase tracking-wide">Additional Notes</label>
                 <textarea placeholder="Anything else we should know..." value={notes}
@@ -364,7 +438,7 @@ export default function BasketPage() {
             </div>
           )}
 
-          {/* STEP 2: Review */}
+          {/* ── STEP 2: Review ── */}
           {step === 2 && (
             <div>
               <h2 className="text-xl font-extrabold text-slate-900 mb-1">Review & Submit</h2>
@@ -372,24 +446,12 @@ export default function BasketPage() {
 
               <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wide mb-3">Items</h3>
               {cart.map(item => (
-                <div key={item.id} className="mb-3 p-4 rounded-xl border border-gray-100 bg-gray-50">
-                  <p className="font-bold text-slate-900 text-sm">{item.product_name}</p>
-                  {item.size_label && <p className="text-xs text-slate-500 mt-1">Size: {item.size_label}</p>}
-                  {item.flavour_name && <p className="text-xs text-slate-500">Sponge: {item.flavour_name}</p>}
-                  {item.filling_name && <p className="text-xs text-slate-500">Filling: {item.filling_name}</p>}
-                  {item.frosting_name && <p className="text-xs text-slate-500">Frosting: {item.frosting_name}</p>}
-                  {item.enquiry_text && <p className="text-xs text-slate-500 italic mt-1">"{item.enquiry_text}"</p>}
-                  {item.addons.map(a => (
-                    <p key={a.addon_id} className="text-xs text-slate-400">+ {a.quantity > 1 ? `${a.quantity}x ` : ''}{a.addon_name}</p>
-                  ))}
-                  {item.notes && <p className="text-xs text-slate-400 italic mt-1">"{item.notes}"</p>}
-                  {item.price > 0 && <p className="text-xs font-bold mt-1.5" style={{ color: accent }}>£{item.price.toFixed(0)}</p>}
-                </div>
+                <CartItemSummary key={item.id} item={item} variant="review" />
               ))}
 
               {inspoPreview && (
-                <div className="mb-4">
-                  <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wide mb-2">Inspiration</h3>
+                <div className="mb-4 mt-2">
+                  <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wide mb-2">Overall Inspiration</h3>
                   <img src={inspoPreview} alt="Inspiration" className="w-full max-h-40 object-cover rounded-xl" />
                 </div>
               )}
@@ -397,7 +459,9 @@ export default function BasketPage() {
               <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wide mb-3 mt-5">Your Details</h3>
               <div className="p-4 rounded-xl border border-gray-100 bg-gray-50 space-y-2">
                 {([
-                  ['Name', customerName], ['Email', customerEmail], ['Date', eventDate],
+                  ['Name', customerName],
+                  ['Email', customerEmail],
+                  ['Date', eventDate],
                   ['Collection', collectionType === 'pickup' ? 'Pickup' : 'Delivery'],
                   budget ? ['Budget', `£${budget}`] : null,
                   dietary ? ['Dietary', dietary] : null,
