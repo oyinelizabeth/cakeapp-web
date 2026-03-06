@@ -35,12 +35,25 @@ export default async function MenuPage({ params }: Props) {
     set_menu: 'Sets & Bundles', custom: 'Custom Orders',
   }
 
+  const CATEGORY_ORDER = [
+    'Cakes',
+    'Specialty Cakes',
+    'Cupcakes & Bento',
+    'Sets & Bundles',
+    'Custom Orders',
+    'Other',
+  ]
+
   const grouped = products.reduce((acc: Record<string, any[]>, p: any) => {
     const label = TYPE_LABELS[p.product_type] || 'Other'
     if (!acc[label]) acc[label] = []
     acc[label].push(p)
     return acc
   }, {})
+
+  const sortedGroups = CATEGORY_ORDER
+    .filter(cat => grouped[cat])
+    .map(cat => [cat, grouped[cat]] as [string, any[]])
 
   return (
     <div className="min-h-screen bg-[#f5f4f2] font-sans text-slate-900">
@@ -102,7 +115,7 @@ export default async function MenuPage({ params }: Props) {
           </div>
         ) : (
           <>
-            {Object.entries(grouped).map(([category, catProducts]: [string, any]) => (
+            {sortedGroups.map(([category, catProducts]: [string, any]) => (
               <section key={category} className="mb-12">
                 <div className="flex items-center gap-3 mb-5">
                   <h2 className="text-lg font-extrabold">{category}</h2>
